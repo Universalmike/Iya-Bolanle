@@ -8,10 +8,24 @@ import {
     getFirestore, doc, setDoc, onSnapshot, collection
 } from 'firebase/firestore';
 
+// --- Environment Variable Utility (Fixes 'empty-import-meta' warning) ---
+
+/**
+ * Safely retrieves environment variables, checking if import.meta and import.meta.env are available.
+ * This resolves the es2015 compilation warning when using Vite.
+ * @param {string} key The VITE_ prefixed environment variable key.
+ * @returns {string | undefined}
+ */
+const getEnvVar = (key) => {
+    if (typeof import.meta !== 'undefined' && import.meta.env) {
+        return import.meta.env[key];
+    }
+    return undefined;
+};
+
 // --- Configuration and API Setup ---
-// FIX: Use process.env for broader compatibility across bundler targets.
-// NOTE: On Netlify, this variable must be set as GEMINI_API_KEY (without the VITE_ prefix).
-const apiKey = process.env.GEMINI_API_KEY || ""; 
+// Netlify variable names MUST be VITE_GEMINI_API_KEY and VITE_FIREBASE_CONFIG.
+const apiKey = getEnvVar('VITE_GEMINI_API_KEY') || ""; 
 const GEMINI_MODEL = "gemini-2.5-flash-preview-05-20";
 const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 const TTS_VOICE_NAME = "Kore"; // A firm, clear voice for a financial assistant
@@ -20,16 +34,15 @@ const TTS_VOICE_NAME = "Kore"; // A firm, clear voice for a financial assistant
 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 const ttsApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${apiKey}`;
 
-// --- Firestore/Auth Global Variables Check (These still rely on Netlify injection) ---
-// Define a standard environment variable name for the Firebase Config.
-const FIREBASE_CONFIG_ENV_KEY = 'FIREBASE_CONFIG';
+// --- Firestore/Auth Global Variables Check ---
+// Define the VITE standard environment variable name for the Firebase Config.
+const VITE_FIREBASE_CONFIG_KEY = 'VITE_FIREBASE_CONFIG';
 
-// Prioritize the Canvas global variable, but fall back to a standard environment variable name 
-// that doesn't violate deployment platform rules (like starting with a letter).
+// Prioritize the Canvas global variable, but fall back to the Vite environment variable via helper.
 const firebaseConfigString = 
     typeof __firebase_config !== 'undefined' 
     ? __firebase_config // Priority 1: Canvas global variable (if running in Canvas)
-    : process.env[FIREBASE_CONFIG_ENV_KEY]; // Priority 2: Standard environment variable (if running in standard Netlify/Vercel deployment)
+    : getEnvVar(VITE_FIREBASE_CONFIG_KEY); // Priority 2: VITE standard environment variable
 
 const firebaseConfig = firebaseConfigString ? JSON.parse(firebaseConfigString) : null;
 
@@ -132,11 +145,12 @@ const playTextToSpeech = async (text, audioRef) => {
             model: TTS_MODEL
         };
 
-        const response = await fetch(ttsApiUrl, {
+        // Use fetchWithRetry for robust API calls
+        const response = await fetchWithRetry(ttsApiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
-        });
+        }, 3);
 
         if (!response.ok) {
             console.error('TTS API error:', response.status, await response.text());
@@ -249,7 +263,7 @@ const App = () => {
                 { role: 'owo', text: `
                 🚫 **Authentication Error (403)** 🚫
                 The Gemini API Key is missing. The application will run in **Simulated Mode**.
-                Please set the \`GEMINI_API_KEY\` environment variable on Netlify to enable full functionality.
+                Please set the **\`VITE_GEMINI_API_KEY\`** environment variable on Netlify to enable full functionality.
                 `}
             ]);
         }
@@ -415,7 +429,7 @@ const App = () => {
         recognitionRef.current = recognition;
         recognition.start();
 
-    }, []); // Empty dependency array, but relies on handleSendMessage being stable (see below)
+    }, [handleSendMessage]); // Added handleSendMessage dependency
 
     // --- Message Handling and Gemini API Call ---
 
@@ -660,7 +674,15 @@ const App = () => {
                 {isApiKeyMissing && (
                     <div className="p-3 mb-4 bg-red-100 border border-red-400 text-red-700 rounded-lg text-sm font-medium">
                         <span className="font-bold">Deployment Error:</span> The Gemini API Key is missing.
-                        Please set the **<code className="bg-red-200 text-red-800 p-0.5 rounded">GEMINI_API_KEY</code>** environment variable in your Netlify settings.
+                        Please set the **<code className="bg-red-200 text-red-800 p-0.5 rounded">VITE_GEMINI_API_KEY</code>** environment variable in your Netlify settings.
+                    </div>
+                )}
+                
+                {/* Firebase Config Alert Banner */}
+                {!isDbPersistenceEnabled && firebaseConfig === null && (
+                    <div className="p-3 mb-4 bg-yellow-100 border border-yellow-400 text-yellow-700 rounded-lg text-sm font-medium">
+                        <span className="font-bold">Simulated Mode:</span> The Firebase config is missing.
+                        Please set the **<code className="bg-yellow-200 text-yellow-800 p-0.5 rounded">VITE_FIREBASE_CONFIG</code>** environment variable in your Netlify settings.
                     </div>
                 )}
                 
