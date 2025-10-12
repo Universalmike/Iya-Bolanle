@@ -9,7 +9,7 @@ import {
 import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 
 // --- Global variables for API access (automatically provided by environment) ---
-const apiKey = "AIzaSyD6mUlXDU77Mbf2MWq7Guu0vl_HJnteOqI";
+const apiKey = "";
 const GEMINI_MODEL = "gemini-2.5-flash-preview-05-20";
 const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 const TTS_VOICE_NAME = "Kore"; // A firm, clear voice for a financial assistant
