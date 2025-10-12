@@ -21,7 +21,19 @@ const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI
 const ttsApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${apiKey}`;
 
 // --- Firestore/Auth Global Variables Check (These still rely on Netlify injection) ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+// Define a standard environment variable name for the Firebase Config.
+const FIREBASE_CONFIG_ENV_KEY = 'FIREBASE_CONFIG';
+
+// Prioritize the Canvas global variable, but fall back to a standard environment variable name 
+// that doesn't violate deployment platform rules (like starting with a letter).
+const firebaseConfigString = 
+    typeof __firebase_config !== 'undefined' 
+    ? __firebase_config // Priority 1: Canvas global variable (if running in Canvas)
+    : process.env[FIREBASE_CONFIG_ENV_KEY]; // Priority 2: Standard environment variable (if running in standard Netlify/Vercel deployment)
+
+const firebaseConfig = firebaseConfigString ? JSON.parse(firebaseConfigString) : null;
+
+// The auth token and app ID are specific to the Canvas environment and must remain as globals.
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-owo-app-id';
 
