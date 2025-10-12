@@ -1,171 +1,160 @@
-import React, { useState, useEffect, useRef } from "react";
-import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import React, { useState, useEffect } from "react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// 🔹 Helper function to safely get environment variables
-const getEnvVar = (key) => import.meta.env[key] || "";
+const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "models/gemini-2.5-flash" });
 
-// 🔹 Gemini initialization
-const apiKey = getEnvVar("VITE_GEMINI_API_KEY");
-let genAI = null;
-if (apiKey) {
-  try {
-    genAI = new GoogleGenerativeAI(apiKey);
-    console.log("✅ Gemini API initialized");
-  } catch (err) {
-    console.error("❌ Gemini initialization failed:", err);
-  }
-} else {
-  console.warn("⚠️ VITE_GEMINI_API_KEY missing");
-}
-
-// 🔹 Safe Firebase configuration parse
-let firebaseConfig = null;
-try {
-  const firebaseConfigString = getEnvVar("VITE_FIREBASE_CONFIG");
-  firebaseConfig = firebaseConfigString ? JSON.parse(firebaseConfigString) : null;
-} catch (err) {
-  console.error("❌ Invalid Firebase config JSON:", err);
-}
-
-let app, db;
-if (firebaseConfig) {
-  try {
-    app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
-    console.log("✅ Firebase initialized");
-  } catch (err) {
-    console.error("❌ Firebase initialization failed:", err);
-  }
-} else {
-  console.warn("⚠️ Firebase config missing. Skipping initialization.");
-}
-
-const App = () => {
-  const [input, setInput] = useState("");
+export default function App() {
   const [messages, setMessages] = useState([]);
-  const [isInputDisabled, setIsInputDisabled] = useState(false);
+  const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const audioRef = useRef(null);
 
-  // 🔹 Speak AI replies automatically
+  // Basic speech synthesis
   useEffect(() => {
-    if (messages.length > 0 && window.speechSynthesis) {
-      const lastMessage = messages[messages.length - 1];
-      if (lastMessage.role === "ai") {
-        const utter = new SpeechSynthesisUtterance(lastMessage.text);
-        utter.rate = 1;
-        utter.pitch = 1;
-        utter.volume = 1;
-        window.speechSynthesis.cancel(); // stop any previous speech
-        window.speechSynthesis.speak(utter);
-      }
+    if (window.speechSynthesis) {
+      const utter = new SpeechSynthesisUtterance("Owo is ready to assist you financially!");
+      utter.lang = "en-NG";
+      window.speechSynthesis.speak(utter);
     }
-  }, [messages]);
+  }, []);
 
-  // 🔹 Handle message send
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  // Mock financial backend
+  const actions = {
+    checkBalance: async () =>
+      `Your current balance is ₦${Math.floor(Math.random() * 100000)}.`,
+    transfer: async (to, amount) =>
+      `✅ Transfer of ₦${amount} to ${to} completed successfully.`,
+    buyAirtime: async (amount, network) =>
+      `📱 ₦${amount} airtime purchased successfully for ${network}.`,
+    transactions: async () => [
+      { date: "2025-10-10", type: "debit", amount: 5000, note: "Groceries" },
+      { date: "2025-10-11", type: "credit", amount: 10000, note: "Salary" },
+    ],
+  };
+
+  const handleSend = async () => {
     if (!input.trim()) return;
 
-    const userMessage = { role: "user", text: input };
-    setMessages((prev) => [...prev, userMessage]);
+    const userMsg = { role: "user", text: input };
+    setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsLoading(true);
-    setIsInputDisabled(true);
 
     try {
-      if (!genAI) throw new Error("Gemini API not initialized");
+      // System prompt for intent detection + multilingual response
+      const systemPrompt = `
+      You are Owo, a friendly multilingual financial assistant.
+      You understand and respond in English, Yoruba, Pidgin, Hausa, or Igbo automatically.
+      You can perform: check balance, transfer, buy airtime, and show transaction history.
+      If user requests an action, respond naturally and include a JSON like:
+      {"intent": "transfer", "to": "John", "amount": 5000}
+      Only include JSON if you detect a clear intent.
+      `;
 
-      const model = genAI.getGenerativeModel({ model: "models/gemini-2.5-flash" });
+      const result = await model.generateContent([
+        systemPrompt,
+        ...messages.map((m) => `${m.role}: ${m.text}`),
+        `user: ${input}`,
+      ]);
 
-      // Combine conversation history
-      const prompt = messages
-        .map((msg) => `${msg.role === "user" ? "User" : "AI"}: ${msg.text}`)
-        .join("\n") + `\nUser: ${userMessage.text}\nAI:`;
+      const responseText = result.response.text();
+      console.log("Gemini raw:", responseText);
 
-      const result = await model.generateContent(prompt);
-      const response = await result.response.text();
+      // Try to extract any JSON intent
+      let reply = responseText;
+      let intent;
+      const match = responseText.match(/\{.*\}/s);
+      if (match) {
+        try {
+          intent = JSON.parse(match[0]);
+        } catch {}
+      }
 
-      const aiReply = { role: "ai", text: response };
-      setMessages((prev) => [...prev, aiReply]);
-    } catch (err) {
-      console.error("❌ Gemini request failed:", err);
+      // Execute mock action if intent is detected
+      if (intent?.intent) {
+        switch (intent.intent) {
+          case "checkBalance":
+            reply = await actions.checkBalance();
+            break;
+          case "transfer":
+            reply = await actions.transfer(intent.to, intent.amount);
+            break;
+          case "buyAirtime":
+            reply = await actions.buyAirtime(intent.amount, intent.network);
+            break;
+          case "transactions":
+            const txs = await actions.transactions();
+            reply =
+              "🧾 Recent transactions:\n" +
+              txs
+                .map(
+                  (t) =>
+                    `${t.date}: ${t.type === "debit" ? "-" : "+"}₦${t.amount} (${t.note})`
+                )
+                .join("\n");
+            break;
+        }
+      }
+
+      const botMsg = { role: "assistant", text: reply };
+      setMessages((prev) => [...prev, botMsg]);
+
+      // Speak reply
+      if (window.speechSynthesis) {
+        const utter = new SpeechSynthesisUtterance(reply);
+        utter.lang = "en-NG";
+        window.speechSynthesis.speak(utter);
+      }
+    } catch (error) {
+      console.error("Gemini error:", error);
       setMessages((prev) => [
         ...prev,
-        { role: "ai", text: "Sorry, I couldn’t process that request." },
+        { role: "assistant", text: "⚠️ Sorry, I couldn’t process your request." },
       ]);
     } finally {
       setIsLoading(false);
-      setIsInputDisabled(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-green-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="bg-green-600 text-white py-4 px-6 text-center text-2xl font-bold">
-          🌾 Smart AI Assistant
-        </div>
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-blue-50 to-purple-100 p-4">
+      <div className="bg-white shadow-lg rounded-2xl w-full max-w-md p-6">
+        <h1 className="text-2xl font-semibold mb-4 text-center text-purple-600">
+          💬 Owo — Financial Assistant
+        </h1>
 
-        {/* Chat messages */}
-        <div className="flex-grow overflow-y-auto p-4 space-y-4">
-          {messages.map((msg, index) => (
+        <div className="h-96 overflow-y-auto border p-3 rounded-lg mb-4 bg-gray-50">
+          {messages.map((m, i) => (
             <div
-              key={index}
-              className={`p-3 rounded-lg ${
-                msg.role === "user"
-                  ? "bg-green-100 self-end text-right"
-                  : "bg-gray-100 text-left"
+              key={i}
+              className={`my-2 p-2 rounded-lg ${
+                m.role === "user"
+                  ? "bg-purple-100 text-right"
+                  : "bg-green-100 text-left"
               }`}
             >
-              <span className="block font-semibold">
-                {msg.role === "user" ? "You" : "AI"}:
-              </span>
-              <span>{msg.text}</span>
+              {m.text}
             </div>
           ))}
-          {isLoading && (
-            <div className="italic text-gray-500">AI is thinking...</div>
-          )}
+          {isLoading && <p className="text-gray-400">Thinking...</p>}
         </div>
 
-        {/* Input form */}
-        <form
-          onSubmit={handleSubmit}
-          className="flex items-center p-4 border-t border-gray-200 bg-white"
-        >
+        <div className="flex space-x-2">
           <input
-            type="text"
+            className="flex-1 border rounded-lg p-2 focus:outline-none"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={isInputDisabled}
             placeholder="Type your message..."
-            className="flex-grow p-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-green-500"
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSend()}
           />
           <button
-            type="submit"
-            disabled={isInputDisabled}
-            className="ml-2 px-4 py-3 bg-green-600 text-white font-semibold rounded-lg shadow hover:bg-green-700 transition"
+            onClick={handleSend}
+            className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700"
           >
-            {isLoading ? "..." : "Send"}
+            Send
           </button>
-        </form>
-
-        <audio ref={audioRef} hidden />
+        </div>
       </div>
-
-      {/* Global styling */}
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-        body { font-family: 'Inter', sans-serif; overflow: hidden; }
-      `}</style>
     </div>
   );
-};
-
-export default App;
-
-
+}
