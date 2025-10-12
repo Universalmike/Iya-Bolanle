@@ -78,7 +78,7 @@ const App = () => {
     try {
       if (!genAI) throw new Error("Gemini API not initialized");
 
-      const model = genAI.getGenerativeModel({ model: "models/gemini-1.5-flash" });
+      const model = genAI.getGenerativeModel({ model: "models/gemini-2.5-flash" });
 
       // Combine conversation history
       const prompt = messages
