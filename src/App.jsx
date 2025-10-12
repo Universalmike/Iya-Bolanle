@@ -2,158 +2,114 @@ import React, { useState, useEffect } from "react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "models/gemini-2.5-flash" });
 
 export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
 
-  // Basic speech synthesis
   useEffect(() => {
     if (window.speechSynthesis) {
-      const utter = new SpeechSynthesisUtterance("Owo is ready to assist you financially!");
-      utter.lang = "en-NG";
+      const utter = new SpeechSynthesisUtterance("Owo online, wetin I fit do for you?");
       window.speechSynthesis.speak(utter);
     }
   }, []);
 
-  // Mock financial backend
-  const actions = {
-    checkBalance: async () =>
-      `Your current balance is ₦${Math.floor(Math.random() * 100000)}.`,
-    transfer: async (to, amount) =>
-      `✅ Transfer of ₦${amount} to ${to} completed successfully.`,
-    buyAirtime: async (amount, network) =>
-      `📱 ₦${amount} airtime purchased successfully for ${network}.`,
-    transactions: async () => [
-      { date: "2025-10-10", type: "debit", amount: 5000, note: "Groceries" },
-      { date: "2025-10-11", type: "credit", amount: 10000, note: "Salary" },
-    ],
+  // Simple keyword-based language detector
+  const detectLanguage = (text) => {
+    const lower = text.toLowerCase();
+    if (/[áéíóúàèìòùẹọ]/.test(lower) || lower.includes("mi o") || lower.includes("se")) return "yoruba";
+    if (lower.includes("abeg") || lower.includes("wey") || lower.includes("una")) return "pidgin";
+    if (lower.includes("kai") || lower.includes("wallahi") || lower.includes("gani")) return "hausa";
+    if (lower.includes("biko") || lower.includes("una eme")) return "igbo";
+    return "english";
   };
 
   const handleSend = async () => {
     if (!input.trim()) return;
 
-    const userMsg = { role: "user", text: input };
-    setMessages((prev) => [...prev, userMsg]);
+    const userLang = detectLanguage(input);
+    const newMessage = { role: "user", text: input, lang: userLang };
+    const updatedMessages = [...messages, newMessage];
+    setMessages(updatedMessages);
     setInput("");
-    setIsLoading(true);
 
     try {
-      // System prompt for intent detection + multilingual response
       const systemPrompt = `
-      You are Owo, a friendly multilingual financial assistant.
-      You understand and respond in English, Yoruba, Pidgin, Hausa, or Igbo automatically.
-      You can perform: check balance, transfer, buy airtime, and show transaction history.
-      If user requests an action, respond naturally and include a JSON like:
-      {"intent": "transfer", "to": "John", "amount": 5000}
-      Only include JSON if you detect a clear intent.
+        You are Owo, a multilingual financial assistant.
+        You understand and can speak English, Yoruba, Pidgin, Hausa, and Igbo.
+        Always reply in the SAME language as the most recent user message.
+        Respond naturally and warmly.
+
+        You can perform:
+        - Check balance
+        - Make transfers
+        - Buy airtime
+        - Show transaction history
+
+        If you detect a financial intent, include a JSON object like:
+        {"intent": "transfer", "to": "Tunde", "amount": 2000}
+        Otherwise, just chat casually.
       `;
+
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
       const result = await model.generateContent([
         systemPrompt,
-        ...messages.map((m) => `${m.role}: ${m.text}`),
-        `user: ${input}`,
+        ...updatedMessages.map((m) => `${m.role}: ${m.text}`),
+        `user (${userLang}): ${input}`,
       ]);
 
-      const responseText = result.response.text();
-      console.log("Gemini raw:", responseText);
+      const reply = result.response.text();
+      const botMessage = { role: "assistant", text: reply };
+      setMessages((prev) => [...prev, botMessage]);
 
-      // Try to extract any JSON intent
-      let reply = responseText;
-      let intent;
-      const match = responseText.match(/\{.*\}/s);
-      if (match) {
-        try {
-          intent = JSON.parse(match[0]);
-        } catch {}
-      }
-
-      // Execute mock action if intent is detected
-      if (intent?.intent) {
-        switch (intent.intent) {
-          case "checkBalance":
-            reply = await actions.checkBalance();
-            break;
-          case "transfer":
-            reply = await actions.transfer(intent.to, intent.amount);
-            break;
-          case "buyAirtime":
-            reply = await actions.buyAirtime(intent.amount, intent.network);
-            break;
-          case "transactions":
-            const txs = await actions.transactions();
-            reply =
-              "🧾 Recent transactions:\n" +
-              txs
-                .map(
-                  (t) =>
-                    `${t.date}: ${t.type === "debit" ? "-" : "+"}₦${t.amount} (${t.note})`
-                )
-                .join("\n");
-            break;
-        }
-      }
-
-      const botMsg = { role: "assistant", text: reply };
-      setMessages((prev) => [...prev, botMsg]);
-
-      // Speak reply
+      // Speak reply aloud in detected language
       if (window.speechSynthesis) {
         const utter = new SpeechSynthesisUtterance(reply);
-        utter.lang = "en-NG";
         window.speechSynthesis.speak(utter);
       }
-    } catch (error) {
-      console.error("Gemini error:", error);
+
+    } catch (err) {
+      console.error("❌ Gemini request failed:", err);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", text: "⚠️ Sorry, I couldn’t process your request." },
+        { role: "assistant", text: "Sorry, I couldn’t process that request 😔" },
       ]);
-    } finally {
-      setIsLoading(false);
     }
   };
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-blue-50 to-purple-100 p-4">
-      <div className="bg-white shadow-lg rounded-2xl w-full max-w-md p-6">
-        <h1 className="text-2xl font-semibold mb-4 text-center text-purple-600">
-          💬 Owo — Financial Assistant
-        </h1>
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-6">
+      <h1 className="text-2xl font-bold mb-4">💸 Owo – Your Multilingual Financial Assistant</h1>
 
-        <div className="h-96 overflow-y-auto border p-3 rounded-lg mb-4 bg-gray-50">
-          {messages.map((m, i) => (
-            <div
-              key={i}
-              className={`my-2 p-2 rounded-lg ${
-                m.role === "user"
-                  ? "bg-purple-100 text-right"
-                  : "bg-green-100 text-left"
+      <div className="w-full max-w-lg bg-gray-800 p-4 rounded-lg shadow-lg h-[60vh] overflow-y-auto">
+        {messages.map((msg, idx) => (
+          <div key={idx} className={`my-2 ${msg.role === "user" ? "text-right" : "text-left"}`}>
+            <span
+              className={`inline-block p-2 rounded-lg ${
+                msg.role === "user" ? "bg-blue-600" : "bg-gray-700"
               }`}
             >
-              {m.text}
-            </div>
-          ))}
-          {isLoading && <p className="text-gray-400">Thinking...</p>}
-        </div>
+              {msg.text}
+            </span>
+          </div>
+        ))}
+      </div>
 
-        <div className="flex space-x-2">
-          <input
-            className="flex-1 border rounded-lg p-2 focus:outline-none"
-            value={input}
-            placeholder="Type your message..."
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
-          />
-          <button
-            onClick={handleSend}
-            className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700"
-          >
-            Send
-          </button>
-        </div>
+      <div className="mt-4 w-full max-w-lg flex">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleSend()}
+          placeholder="Type your message..."
+          className="flex-1 p-3 rounded-l-lg bg-gray-700 text-white outline-none"
+        />
+        <button
+          onClick={handleSend}
+          className="bg-blue-600 px-4 py-2 rounded-r-lg hover:bg-blue-700"
+        >
+          Send
+        </button>
       </div>
     </div>
   );
