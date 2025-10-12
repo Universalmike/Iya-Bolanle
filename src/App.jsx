@@ -1,9 +1,24 @@
 import React, { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // 🔹 Helper function to safely get environment variables
 const getEnvVar = (key) => import.meta.env[key] || "";
+
+// 🔹 Gemini initialization
+const apiKey = getEnvVar("VITE_GEMINI_API_KEY");
+let genAI = null;
+if (apiKey) {
+  try {
+    genAI = new GoogleGenerativeAI(apiKey);
+    console.log("✅ Gemini API initialized");
+  } catch (err) {
+    console.error("❌ Gemini initialization failed:", err);
+  }
+} else {
+  console.warn("⚠️ VITE_GEMINI_API_KEY missing");
+}
 
 // 🔹 Safe Firebase configuration parse
 let firebaseConfig = null;
@@ -34,21 +49,22 @@ const App = () => {
   const [isLoading, setIsLoading] = useState(false);
   const audioRef = useRef(null);
 
-  // 🔹 Speech effect for new AI replies
+  // 🔹 Speak AI replies automatically
   useEffect(() => {
     if (messages.length > 0 && window.speechSynthesis) {
       const lastMessage = messages[messages.length - 1];
       if (lastMessage.role === "ai") {
         const utter = new SpeechSynthesisUtterance(lastMessage.text);
-        utter.rate = 1; // normal speed
+        utter.rate = 1;
         utter.pitch = 1;
         utter.volume = 1;
+        window.speechSynthesis.cancel(); // stop any previous speech
         window.speechSynthesis.speak(utter);
       }
     }
   }, [messages]);
 
-  // 🔹 Example handleSubmit function
+  // 🔹 Handle message send
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -60,15 +76,26 @@ const App = () => {
     setIsInputDisabled(true);
 
     try {
-      // 🔹 Example AI response simulation — replace with Gemini API call
-      const aiReply = {
-        role: "ai",
-        text: `You said: ${userMessage.text}. This is a demo response.`,
-      };
+      if (!genAI) throw new Error("Gemini API not initialized");
 
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+      // Combine conversation history
+      const prompt = messages
+        .map((msg) => `${msg.role === "user" ? "User" : "AI"}: ${msg.text}`)
+        .join("\n") + `\nUser: ${userMessage.text}\nAI:`;
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response.text();
+
+      const aiReply = { role: "ai", text: response };
       setMessages((prev) => [...prev, aiReply]);
     } catch (err) {
-      console.error("❌ AI request failed:", err);
+      console.error("❌ Gemini request failed:", err);
+      setMessages((prev) => [
+        ...prev,
+        { role: "ai", text: "Sorry, I couldn’t process that request." },
+      ]);
     } finally {
       setIsLoading(false);
       setIsInputDisabled(false);
@@ -140,4 +167,5 @@ const App = () => {
 };
 
 export default App;
+
 
