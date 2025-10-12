@@ -6,15 +6,19 @@ const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
 export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [balance, setBalance] = useState(10000); // initial balance ₦10,000
+  const [transactions, setTransactions] = useState([]);
 
   useEffect(() => {
     if (window.speechSynthesis) {
-      const utter = new SpeechSynthesisUtterance("Owo online, wetin I fit do for you?");
+      const utter = new SpeechSynthesisUtterance(
+        "Owo online! Wetin I fit do for you?"
+      );
       window.speechSynthesis.speak(utter);
     }
   }, []);
 
-  // Simple keyword-based language detector
+  // Basic language detector
   const detectLanguage = (text) => {
     const lower = text.toLowerCase();
     if (/[áéíóúàèìòùẹọ]/.test(lower) || lower.includes("mi o") || lower.includes("se")) return "yoruba";
@@ -24,63 +28,134 @@ export default function App() {
     return "english";
   };
 
+  const simulateTransaction = (intent, amount, recipient) => {
+    if (intent === "transfer") {
+      if (amount > balance) return "You no get enough money for that transfer 😅";
+      setBalance((prev) => prev - amount);
+      setTransactions((prev) => [
+        ...prev,
+        { type: "Transfer", amount, to: recipient, date: new Date().toLocaleString() },
+      ]);
+      return `✅ Transfer of ₦${amount} to ${recipient} don go successfully. Your new balance na ₦${balance - amount}.`;
+    }
+
+    if (intent === "buy_airtime") {
+      if (amount > balance) return "Your balance no reach for that airtime 😅";
+      setBalance((prev) => prev - amount);
+      setTransactions((prev) => [
+        ...prev,
+        { type: "Airtime", amount, to: "Self", date: new Date().toLocaleString() },
+      ]);
+      return `📱 Airtime of ₦${amount} don enter your line. New balance na ₦${balance - amount}.`;
+    }
+
+    if (intent === "check_balance") {
+      return `💰 Your balance na ₦${balance}.`;
+    }
+
+    if (intent === "show_transaction_history") {
+      if (transactions.length === 0) return "You never get any transaction yet.";
+      return (
+        "📜 Here be your last transactions:\n" +
+        transactions
+          .slice(-5)
+          .map(
+            (t) =>
+              `${t.type} - ₦${t.amount} ${
+                t.to ? `to ${t.to}` : ""
+              } (${t.date})`
+          )
+          .join("\n")
+      );
+    }
+
+    return null;
+  };
+
   const handleSend = async () => {
     if (!input.trim()) return;
 
     const userLang = detectLanguage(input);
     const newMessage = { role: "user", text: input, lang: userLang };
-    const updatedMessages = [...messages, newMessage];
-    setMessages(updatedMessages);
+    setMessages((prev) => [...prev, newMessage]);
     setInput("");
 
     try {
       const systemPrompt = `
-        You are Owo, a multilingual financial assistant.
-        You understand and can speak English, Yoruba, Pidgin, Hausa, and Igbo.
-        Always reply in the SAME language as the most recent user message.
-        Respond naturally and warmly.
+        You are Owo, a friendly, multilingual financial assistant.
+        You can speak English, Yoruba, Pidgin, Hausa, and Igbo.
+        Always reply in the same language as the user message.
 
-        You can perform:
-        - Check balance
-        - Make transfers
-        - Buy airtime
-        - Show transaction history
+        Your tasks include:
+        - Checking balance
+        - Making transfers
+        - Buying airtime
+        - Showing transaction history
 
-        If you detect a financial intent, include a JSON object like:
-        {"intent": "transfer", "to": "Tunde", "amount": 2000}
-        Otherwise, just chat casually.
+        Do NOT show JSON or code blocks.
+        Reply like a real human assistant.
+        If unsure, ask short, natural questions for clarification.
       `;
 
-      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+      const model = genAI.getGenerativeModel({ model: "models/gemini-2.0-flash" });
 
       const result = await model.generateContent([
         systemPrompt,
-        ...updatedMessages.map((m) => `${m.role}: ${m.text}`),
+        ...messages.map((m) => `${m.role}: ${m.text}`),
         `user (${userLang}): ${input}`,
       ]);
 
-      const reply = result.response.text();
-      const botMessage = { role: "assistant", text: reply };
-      setMessages((prev) => [...prev, botMessage]);
+      const replyText = result.response.text();
 
-      // Speak reply aloud in detected language
-      if (window.speechSynthesis) {
-        const utter = new SpeechSynthesisUtterance(reply);
-        window.speechSynthesis.speak(utter);
+      // Detect financial intent with a lightweight heuristic
+      let intent = null;
+      let amount = null;
+      let recipient = null;
+
+      const text = input.toLowerCase();
+
+      if (text.includes("transfer") || text.includes("send")) {
+        intent = "transfer";
+        const match = text.match(/\d+/);
+        amount = match ? parseInt(match[0]) : 0;
+        const toMatch = text.match(/to\s+(\w+)/);
+        recipient = toMatch ? toMatch[1] : "unknown";
+      } else if (text.includes("airtime") || text.includes("recharge")) {
+        intent = "buy_airtime";
+        const match = text.match(/\d+/);
+        amount = match ? parseInt(match[0]) : 0;
+      } else if (text.includes("balance")) {
+        intent = "check_balance";
+      } else if (text.includes("transaction") || text.includes("history")) {
+        intent = "show_transaction_history";
       }
 
+      let botReply = replyText;
+
+      if (intent) {
+        const simulatedResponse = simulateTransaction(intent, amount, recipient);
+        if (simulatedResponse) botReply = simulatedResponse;
+      }
+
+      const botMessage = { role: "assistant", text: botReply };
+      setMessages((prev) => [...prev, botMessage]);
+
+      if (window.speechSynthesis) {
+        const utter = new SpeechSynthesisUtterance(botReply);
+        window.speechSynthesis.speak(utter);
+      }
     } catch (err) {
       console.error("❌ Gemini request failed:", err);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", text: "Sorry, I couldn’t process that request 😔" },
+        { role: "assistant", text: "Sorry, I no fit process that one 😔" },
       ]);
     }
   };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-6">
-      <h1 className="text-2xl font-bold mb-4">💸 Owo – Your Multilingual Financial Assistant</h1>
+      <h1 className="text-2xl font-bold mb-4">💸 Owo – Multilingual Financial Assistant</h1>
 
       <div className="w-full max-w-lg bg-gray-800 p-4 rounded-lg shadow-lg h-[60vh] overflow-y-auto">
         {messages.map((msg, idx) => (
