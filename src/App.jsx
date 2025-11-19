@@ -1,85 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
-const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
-
-export default function App() {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [balance, setBalance] = useState(10000); // initial balance ₦10,000
-  const [transactions, setTransactions] = useState([]);
-
-  useEffect(() => {
-    if (window.speechSynthesis) {
-      const utter = new SpeechSynthesisUtterance(
-        "Owo online! Wetin I fit do for you?"
-      );
-      window.speechSynthesis.speak(utter);
-    }
-  }, []);
-
-  // Basic language detector
-  const detectLanguage = (text) => {
-    const lower = text.toLowerCase();
-    if (/[áéíóúàèìòùẹọ]/.test(lower) || lower.includes("mi o") || lower.includes("se")) return "yoruba";
-    if (lower.includes("abeg") || lower.includes("wey") || lower.includes("una")) return "pidgin";
-    if (lower.includes("kai") || lower.includes("wallahi") || lower.includes("gani")) return "hausa";
-    if (lower.includes("biko") || lower.includes("una eme")) return "igbo";
-    return "english";
-  };
-
-  const simulateTransaction = (intent, amount, recipient) => {
-    if (intent === "transfer") {
-      if (amount > balance) return "You no get enough money for that transfer 😅";
-      setBalance((prev) => prev - amount);
-      setTransactions((prev) => [
-        ...prev,
-        { type: "Transfer", amount, to: recipient, date: new Date().toLocaleString() },
-      ]);
-      return `✅ Transfer of ₦${amount} to ${recipient} don go successfully. Your new balance na ₦${balance - amount}.`;
-    }
-
-    if (intent === "buy_airtime") {
-      if (amount > balance) return "Your balance no reach for that airtime 😅";
-      setBalance((prev) => prev - amount);
-      setTransactions((prev) => [
-        ...prev,
-        { type: "Airtime", amount, to: "Self", date: new Date().toLocaleString() },
-      ]);
-      return `📱 Airtime of ₦${amount} don enter your line. New balance na ₦${balance - amount}.`;
-    }
-
-    if (intent === "check_balance") {
-      return `💰 Your balance na ₦${balance}.`;
-    }
-
-    if (intent === "show_transaction_history") {
-      if (transactions.length === 0) return "You never get any transaction yet.";
-      return (
-        "📜 Here be your last transactions:\n" +
-        transactions
-          .slice(-5)
-          .map(
-            (t) =>
-              `${t.type} - ₦${t.amount} ${
-                t.to ? `to ${t.to}` : ""
-              } (${t.date})`
-          )
-          .join("\n")
-      );
-    }
-
-    return null;
-  };
-
-  const handleSend = async () => {
 
 /**
  * IMPORTANT:
  * - Ensure you installed: npm install @google/generative-ai
  * - Set env var: VITE_GEMINI_API_KEY=your_key_here
- *
- * This file is a single-file React app (option B). Paste into src/App.jsx.
  */
 
 // ------------------------- Gemini init -------------------------
@@ -274,7 +199,7 @@ export default function App() {
     if (!existing) {
       const newUsers = {
         ...users,
-        [clean]: { balance: 10000, transactions: [] }, // start balance
+        [clean]: { balance: 10000, transactions: [] }, // start balance ₦10,000
       };
       setUsers(newUsers);
       saveAllUsers(newUsers);
@@ -301,7 +226,7 @@ export default function App() {
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-    recognition.lang = "en-NG"; // Accept Nigerian English; recognition still understands many phrases
+    recognition.lang = "en-NG"; // Accept Nigerian English
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
@@ -424,21 +349,19 @@ If you need clarification ask a short question in the user's language.
         try {
           // Pass system prompt + conversation
           const response = await model.generateContent({
-            // The SDK may accept array or structured content; using a simple approach
-            // Many SDKs accept 'contents' array — if your SDK differs, adapt accordingly
             contents: [
               { parts: [{ text: systemPrompt }] },
+              // Note: The structure for sending history can be complex. We simplify by sending the system prompt, history, and current text sequentially.
               { parts: [{ text: shortHistory.join("\n") }] },
-              { parts: [{ text }] }
+              { parts: [{ text: inputTurn }] }
             ],
-            // optional: keep response modality text only
             model: "models/gemini-2.5-flash"
           });
 
           // SDK return may vary; try to read text safely
           const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (candidate) botReplyText = candidate;
-          else if (response?.response?.text) botReplyText = response.response.text();
+          else if (response?.text) botReplyText = response.text; // Some SDK versions might return it directly
           else botReplyText = "Sorry, I couldn't formulate a reply right now.";
         } catch (gErr) {
           console.warn("Gemini call failed, falling back to simulated reply:", gErr);
@@ -458,8 +381,6 @@ If you need clarification ask a short question in the user's language.
       // If an action was performed (simulated returned a non-null string), prefer that reply (so user sees concrete action)
       let finalReply = simulated || botReplyText;
 
-      // Keep reply in same language as detection: attempt to run the translation through Gemini if parsed but only if model present
-      // (We avoid printing JSON: replies are plain text)
       setMessages((prev) => [...prev, { role: "assistant", text: finalReply, lang: userLang }]);
 
       // Speak reply aloud using TTS in correct style
