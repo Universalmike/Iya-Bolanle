@@ -31,48 +31,30 @@ const getModel = (modelName = "models/gemini-2.5-flash") => {
   }
 };
 
-// ------------------------- FUNCTION CALLING TOOL DECLARATION -------------------------
-
-// Define the function the model can call to execute financial actions
-const transactionTool = {
-  functionDeclarations: [
-    {
-      name: "executeFinancialAction",
-      description: "Executes a simulated financial action: checking balance, transferring funds, or buying airtime.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: {
-            type: "string",
-            description: "The financial action requested by the user. Must be one of: 'check_balance', 'transfer', 'buy_airtime', or 'show_history'.",
-          },
-          amount: {
-            type: "number",
-            description: "The numeric amount of money for the action. Only required for 'transfer' or 'buy_airtime'. Must be a positive integer.",
-          },
-          recipient: {
-            type: "string",
-            description: "The name of the recipient for a 'transfer' action (e.g., 'Tunde'). Only required for 'transfer'.",
-          },
-        },
-        required: ["action"],
-      },
-    },
-  ],
-};
-
 // ------------------------- Util: Language & Text Helpers -------------------------
 const detectLanguage = (text = "") => {
   if (!text) return "english";
   const s = text.toLowerCase();
-  if (/\b(abeg|wey|una|omo|na|i go|dey go|wetin|sef)\b/.test(s)) return "pidgin";
-  if (/[ṣọạẹọ́àèìòù]/.test(s) || /\b(mi o|kin ni|se|owo|abẹ|gba|bawo)\b/.test(s)) return "yoruba";
-  if (/\b(biko|nna|nne|ego|kedu|ime|onye|otu)\b/.test(s) || /ị|ịbụ|ọzọ/.test(s)) return "igbo";
-  if (/\b(kai|ina|yaya|sannu|don Allah|wallahi|yola)\b/.test(s)) return "hausa";
+
+  // pidgin keywords
+  if (/\b(abeg|wey|una|omi|omo|i go|i go do|na)\b/.test(s)) return "pidgin";
+
+  // yoruba detection (common characters / words)
+  if (/[ṣọạẹẹọẹọ́àèìòùẹ]/.test(s) || /\b(mi |mi o|kin ni|se|owo|abẹ|gba)\b/.test(s)) return "yoruba";
+
+  // igbo detection
+  if (/\b(biko|nna|nne|ego|kedu|ime|onye)\b/.test(s) || /ị|ịbụ|ọzọ/.test(s)) return "igbo";
+
+  // hausa detection
+  if (/\b(kai|ina|yaya|sannu|don Allah|wallahi)\b/.test(s)) return "hausa";
+
+  // default english
   return "english";
 };
 
+// FIX 1: Utility to strip emojis from text for TTS
 const stripEmojis = (text) => {
+  // Regex matches various unicode ranges commonly used for emojis and symbols
   return text.replace(/(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g, '');
 };
 
@@ -84,9 +66,12 @@ const pickVoiceForLanguage = (lang) => {
   const findPrefer = (pattern) =>
     voices.find((v) => v.lang && v.lang.toLowerCase().includes(pattern));
 
+  // prefer Nigerian-en when available (en-ng)
   if (lang === "pidgin" || lang === "yoruba" || lang === "igbo" || lang === "hausa") {
     return findPrefer("en-ng") || findPrefer("en-gb") || voices[0];
   }
+
+  // english default: en-us > en-gb
   return findPrefer("en-us") || findPrefer("en-gb") || voices[0];
 };
 
@@ -94,12 +79,16 @@ const speakText = (text, lang = "english", opts = {}) => {
   if (!("speechSynthesis" in window)) return;
   try {
     window.speechSynthesis.cancel();
+    
+    // FIX 1: Clean the text before speaking
     const cleanText = stripEmojis(text); 
     const utter = new SpeechSynthesisUtterance(cleanText);
 
+    // set voice & lang code if possible
     const voice = pickVoiceForLanguage(lang);
     if (voice) utter.voice = voice;
 
+    // tune rate/pitch roughly per language to mimic cadence
     switch (lang) {
       case "yoruba":
         utter.rate = opts.rate ?? 0.92;
@@ -128,11 +117,13 @@ const speakText = (text, lang = "english", opts = {}) => {
   }
 };
 
+// ensure voices loaded in some browsers
 const ensureVoicesLoaded = () => {
   return new Promise((res) => {
     const voices = window.speechSynthesis.getVoices();
     if (voices && voices.length) return res(true);
     window.speechSynthesis.onvoiceschanged = () => res(true);
+    // fallback timeout
     setTimeout(() => res(!!window.speechSynthesis.getVoices().length), 1500);
   });
 };
@@ -154,97 +145,89 @@ const saveAllUsers = (obj) => {
   localStorage.setItem(USERS_KEY, JSON.stringify(obj));
 };
 
-// ------------------------- Core Action Execution Function (NEW SECURE VERSION) -------------------------
+// ------------------------- Intent extraction (simple heuristics) -------------------------
+const parseIntentFromText = (text) => {
+  const s = text.toLowerCase();
+  
+  // FIX 2: Robust number parsing (handling commas and simple number words)
+  let amount = null;
+  
+  // 1. Try to find a number written in digits (handling commas: 1000, 1,000)
+  // Regex: Finds 1-3 digits, optionally followed by groups of ',3 digits' OR finds any single digit group
+  let numMatch = s.match(/(\d{1,3}(,\d{3})*|\d+)/);
+  if (numMatch) {
+      amount = parseInt(numMatch[0].replace(/,/g, ''), 10);
+  }
+  
+  // 2. If no number is found, check for the word 'thousand' to multiply
+  if (!amount) {
+      // Look for number words followed by 'thousand' (e.g., two thousand)
+      const wordMatch = s.match(/\b(one|two|three|four|five|ten|twenty)\s+thousand\b/);
+      if (wordMatch) {
+          const multiplierMap = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'twenty': 20 };
+          const word = wordMatch[1];
+          amount = multiplierMap[word] * 1000;
+      }
+  }
 
-// This function executes the transaction based on the structured data provided by Gemini
-const executeToolCall = (userKey, action, amount, recipient, users) => {
-    // NOTE: This function no longer calls setUsers directly.
-    
-    const userData = users[userKey];
-    if (!userData) return { error: "User account missing." };
-    
-    const currentBalance = userData.balance;
 
-    switch (action) {
-        case "check_balance":
-            return { 
-                updates: null, 
-                message: `Your current balance is ₦${currentBalance}.` 
-            };
+  // transfer patterns
+  if (/\b(send|transfer|pay|give|transfer to|send to)\b/.test(s)) {
+    // recipient heuristics: "to NAME" or "give NAME"
+    const toMatch = s.match(/\b(?:to|give|for)\s+([A-Za-z0-9_]+)/);
+    const recipient = toMatch ? toMatch[1] : "recipient";
+    return { intent: "transfer", amount, recipient };
+  }
 
-        case "transfer": {
-            const amt = amount || 0;
-            const targetRecipient = recipient || "recipient";
-            if (amt <= 0) return { error: "Please specify a valid transfer amount." };
-            if (currentBalance < amt) return { error: "Transaction failed: insufficient funds." };
-            
-            const newBal = currentBalance - amt;
-            const tx = { type: "Transfer", amount: amt, to: targetRecipient, date: new Date().toLocaleString() };
-            
-            return { 
-                updates: { balance: newBal, transactions: [...userData.transactions, tx] }, 
-                message: `Transfer of ₦${amt} to ${targetRecipient} completed. New balance: ₦${newBal}.` 
-            };
-        }
+  // airtime
+  if (/\b(airtime|recharge|top ?up)\b/.test(s)) {
+    return { intent: "buy_airtime", amount, recipient: null };
+  }
 
-        case "buy_airtime": {
-            const amt = amount || 0;
-            if (amt <= 0) return { error: "Please specify airtime amount." };
-            if (currentBalance < amt) return { error: "Transaction failed: insufficient funds." };
-            
-            const newBal = currentBalance - amt;
-            const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toLocaleString() };
-            
-            return { 
-                updates: { balance: newBal, transactions: [...userData.transactions, tx] }, 
-                message: `Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.` 
-            };
-        }
+  // balance
+  if (/\b(balance|how much|how many|remain|wetin be my balance|kin ni balance)\b/.test(s)) {
+    return { intent: "check_balance" };
+  }
 
-        case "show_history": {
-            const slice = (userData.transactions || []).slice(-8).reverse();
-            if (!slice.length) return { updates: null, message: "You have no transactions yet." };
-            
-            const historyText = "📜 Recent transactions:\n" + slice.map(t => 
-                `${t.date} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`
-            ).join("\n");
-            
-            return { updates: null, message: historyText };
-        }
-        
-        default:
-            return { error: `Unsupported action: ${action}` };
-    }
+  // transactions/history
+  if (/\b(history|transactions|last transactions|transaction history|show transactions)\b/.test(s)) {
+    return { intent: "show_transaction_history" };
+  }
+
+  return { intent: null };
 };
 
 // ------------------------- Main App component -------------------------
 export default function App() {
+  // user/session state
   const [username, setUsername] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [users, setUsers] = useState(() => loadAllUsers());
-  const [messages, setMessages] = useState([]); 
+
+  // chat state
+  const [messages, setMessages] = useState([]); // {role: 'user'|'assistant', text: '', lang }
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+
+  // speech recognition refs
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
-  const lastMsgsRef = useRef(null);
 
+  // ensure voices loaded on mount
   useEffect(() => {
     ensureVoicesLoaded();
+    // greet
     speakText("Owo ready. Please login to continue.", "english");
   }, []);
 
-  useEffect(() => {
-    lastMsgsRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isThinking]);
-
+  // ------------------------- User management -------------------------
   const ensureUserExists = (name) => {
     const clean = name.trim().toLowerCase();
     const existing = users[clean];
     if (!existing) {
       const newUsers = {
         ...users,
-        [clean]: { balance: 10000, transactions: [] },
+        [clean]: { balance: 10000, transactions: [] }, // start balance ₦10,000
       };
       setUsers(newUsers);
       saveAllUsers(newUsers);
@@ -262,8 +245,8 @@ export default function App() {
     speakText(`Welcome ${clean}. How can I help you today?`, "english");
   };
 
+  // ------------------------- Speech recognition (voice input) -------------------------
   const startListening = useCallback(() => {
-    // ... (Speech recognition logic remains the same)
     if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
       setMessages((prev) => [...prev, { role: "assistant", text: "Voice input not supported in this browser.", lang: "english" }]);
       return;
@@ -271,7 +254,7 @@ export default function App() {
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-    recognition.lang = "en-NG";
+    recognition.lang = "en-NG"; // Accept Nigerian English
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
@@ -283,6 +266,7 @@ export default function App() {
       setIsListening(false);
       recognition.stop();
       setInput(transcript);
+      // auto-send
       handleSend(transcript);
     };
     recognition.onerror = (e) => {
@@ -305,7 +289,53 @@ export default function App() {
     setIsListening(false);
   };
 
-// ------------------------- Core: send message & process (FINAL SECURE VERSION) -------------------------
+  // ------------------------- Simulated transaction actions -------------------------
+  const saveUserUpdates = (userKey, updates) => {
+    const fresh = { ...users, [userKey]: { ...users[userKey], ...updates } };
+    setUsers(fresh);
+    saveAllUsers(fresh);
+  };
+
+  const runSimulatedAction = (userKey, parsedIntent) => {
+    const userData = users[userKey];
+    if (!userData) return "User account missing.";
+
+    const { intent, amount, recipient } = parsedIntent;
+
+    if (intent === "check_balance") {
+      return `💰 Your balance is ₦${userData.balance}.`;
+    }
+
+    if (intent === "transfer") {
+      const amt = amount || 0;
+      if (amt <= 0) return "Please specify a valid amount.";
+      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
+      const newBal = userData.balance - amt;
+      const tx = { type: "Transfer", amount: amt, to: recipient || "recipient", date: new Date().toLocaleString() };
+      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
+      return `✅ Transfer of ₦${amt} to ${recipient || "recipient"} completed. New balance: ₦${newBal}.`;
+    }
+
+    if (intent === "buy_airtime") {
+      const amt = amount || 0;
+      if (amt <= 0) return "Please specify airtime amount.";
+      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
+      const newBal = userData.balance - amt;
+      const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toLocaleString() };
+      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
+      return `📱 Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`;
+    }
+
+    if (intent === "show_transaction_history") {
+      const slice = (userData.transactions || []).slice(-8).reverse();
+      if (!slice.length) return "You have no transactions yet.";
+      return "📜 Recent transactions:\n" + slice.map(t => `${t.date} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
+    }
+
+    return null;
+  };
+
+  // ------------------------- Core: send message & process -------------------------
   const handleSend = async (explicitText) => {
     const text = explicitText !== undefined ? explicitText : input;
     if (!text || !text.trim()) return;
@@ -315,120 +345,81 @@ export default function App() {
     }
 
     const userKey = username.trim().toLowerCase();
-    const userLang = detectLanguage(text);
 
+    // append user message
+    const userLang = detectLanguage(text);
     setMessages((prev) => [...prev, { role: "user", text, lang: userLang }]);
     setInput("");
+
     setIsThinking(true);
 
     try {
+      // FIX 3: Enhanced System Prompt
       const systemPrompt = `
 You are Owo, a friendly multilingual financial assistant for Nigerian users.
-Your goal is to help the user perform financial actions (transfer, check balance, buy airtime) by calling the 'executeFinancialAction' tool.
-You understand and respond fluently in the SAME language the user speaks: English, Nigerian Pidgin, Yoruba, Igbo, or Hausa.
-If the user's intent is unclear, ask for clarification in their language.
-If you call the function, use the result to generate a final, natural, localized response.
+You understand and respond fluently in English, Nigerian Pidgin, Yoruba, Igbo, and Hausa.
+Always reply **naturally and fluently** in the SAME language as the user's message, including appropriate greetings and local phrases.
+Do NOT output raw JSON or code blocks. Respond naturally like a human assistant.
+You can check balance, make transfers, buy airtime, and show transaction history.
+If you need clarification ask a short question in the user's language.
 `;
-      
+
+      // build conversation context (last ~10 messages to keep prompt small)
+      const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
+      const inputTurn = `User (${userLang}): ${text}`;
+
+      let botReplyText = null;
       const model = getModel("models/gemini-2.5-flash");
-      if (!model) return;
+      if (model) {
+        try {
+          const response = await model.generateContent({
+            contents: [
+              { parts: [{ text: systemPrompt }] },
+              { parts: [{ text: shortHistory.join("\n") }] },
+              { parts: [{ text: inputTurn }] }
+            ],
+            model: "models/gemini-2.5-flash"
+          });
 
-      // Build conversation history for the model
-      let contents = [{ role: "user", parts: [{ text: text }] }];
-      const history = messages.slice(-8).map(m => ({
-          role: m.role === 'user' ? 'user' : 'model',
-          parts: [{ text: m.text }]
-      }));
-      contents = [
-          { role: "system", parts: [{ text: systemPrompt }] },
-          ...history,
-          ...contents
-      ];
-
-      // --- STEP 1: Send message with Tool Declaration ---
-      let response = await model.generateContent({
-          contents: contents,
-          config: {
-              tools: [{ functionDeclarations: [transactionTool.functionDeclarations[0]] }],
-          }
-      });
-
-      let finalReply = "Sorry, I couldn't process that request.";
-      const candidates = response.candidates || [];
-      const candidate = candidates[0];
-
-      // --- Check for Function Call ---
-      if (candidate?.functionCalls && candidate.functionCalls.length > 0) {
-        
-        const toolCall = candidate.functionCalls[0];
-        const { action, amount, recipient } = toolCall.args;
-        
-        // Execute the function (local transaction logic)
-        // NOTE: setUsers is NOT passed here, it is handled after the result.
-        const toolResult = executeToolCall(userKey, action, amount, recipient, users);
-        
-        // *** CRITICAL NEW LOGIC: Apply updates only if the function returned them ***
-        if (toolResult.updates) {
-            const fresh = { ...users, [userKey]: { ...users[userKey], ...toolResult.updates } };
-            setUsers(fresh);
-            saveAllUsers(fresh);
+          const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (candidate) botReplyText = candidate;
+          else if (response?.text) botReplyText = response.text;
+          else botReplyText = "Sorry, I couldn't formulate a reply right now.";
+        } catch (gErr) {
+          console.warn("Gemini call failed, falling back to simulated reply:", gErr);
         }
-        
-        // --- STEP 2: Send the Tool Result back to the model ---
-        
-        // Model's turn (The function call itself, using the part returned from API)
-        const modelFunctionCallTurn = {
-            role: "model",
-            parts: candidate.content.parts
-        };
-        
-        // Function's turn (The result from our code, including the message)
-        const functionResponseContent = {
-            role: "function",
-            parts: [{
-                functionResponse: {
-                    name: toolCall.name,
-                    response: { message: toolResult.message || toolResult.error },
-                },
-            }],
-        };
-        
-        // Assemble the complete history for the final call
-        const secondCallContents = [
-            ...contents,
-            modelFunctionCallTurn,
-            functionResponseContent
-        ];
-        
-        // Make the second call to get the final localized, human-friendly response
-        response = await model.generateContent({
-            contents: secondCallContents,
-            config: {
-                tools: [{ functionDeclarations: [transactionTool.functionDeclarations[0]] }],
-            }
-        });
-        
-        finalReply = response?.text || "Sorry, I received the result but couldn't generate a final reply.";
-
-      } else {
-          // No function call was needed (e.g., general question), use the first response text
-          finalReply = response?.text || finalReply;
       }
 
+      if (!botReplyText) {
+        botReplyText = userLang === "pidgin" ? "Okay, make I check am..." : "Alright, let me handle that for you...";
+      }
+
+      const parsed = parseIntentFromText(text);
+      const simulated = runSimulatedAction(userKey, parsed);
+
+      let finalReply = simulated || botReplyText;
+
       setMessages((prev) => [...prev, { role: "assistant", text: finalReply, lang: userLang }]);
+
       await ensureVoicesLoaded();
       speakText(finalReply, userLang);
 
     } catch (err) {
-      console.error("Chat/Function Calling CRITICAL ERROR:", err);
-      // The most common error here is the API structure (Cause 2) or network (Cause 1).
-      setMessages((prev) => [...prev, { role: "assistant", text: "Sorry, a transaction error occurred. Please check the console for details.", lang: "english" }]);
+      console.error("Chat error:", err);
+      setMessages((prev) => [...prev, { role: "assistant", text: "Sorry, something went wrong.", lang: "english" }]);
     } finally {
       setIsThinking(false);
     }
   };
 
-  // ------------------------- Render (Same as before) -------------------------
+  // UI helpers
+  const lastMsgsRef = useRef(null);
+  useEffect(() => {
+    // auto-scroll
+    lastMsgsRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isThinking]);
+
+  // ------------------------- Render -------------------------
   if (!isLoggedIn) {
     return (
       <div style={styles.container}>
