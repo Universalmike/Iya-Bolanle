@@ -31,7 +31,7 @@ const getModel = (modelName = "models/gemini-2.5-flash") => {
   }
 };
 
-// ------------------------- Util: Language detection -------------------------
+// ------------------------- Util: Language & Text Helpers -------------------------
 const detectLanguage = (text = "") => {
   if (!text) return "english";
   const s = text.toLowerCase();
@@ -50,6 +50,12 @@ const detectLanguage = (text = "") => {
 
   // default english
   return "english";
+};
+
+// FIX 1: Utility to strip emojis from text for TTS
+const stripEmojis = (text) => {
+  // Regex matches various unicode ranges commonly used for emojis and symbols
+  return text.replace(/(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g, '');
 };
 
 // ------------------------- TTS voice picker & helpers -------------------------
@@ -73,7 +79,10 @@ const speakText = (text, lang = "english", opts = {}) => {
   if (!("speechSynthesis" in window)) return;
   try {
     window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
+    
+    // FIX 1: Clean the text before speaking
+    const cleanText = stripEmojis(text); 
+    const utter = new SpeechSynthesisUtterance(cleanText);
 
     // set voice & lang code if possible
     const voice = pickVoiceForLanguage(lang);
@@ -139,9 +148,28 @@ const saveAllUsers = (obj) => {
 // ------------------------- Intent extraction (simple heuristics) -------------------------
 const parseIntentFromText = (text) => {
   const s = text.toLowerCase();
-  // numbers extraction (first numeric token)
-  const numMatch = s.match(/\b(\d{2,}|[0-9]+)\b/);
-  const amount = numMatch ? parseInt(numMatch[0], 10) : null;
+  
+  // FIX 2: Robust number parsing (handling commas and simple number words)
+  let amount = null;
+  
+  // 1. Try to find a number written in digits (handling commas: 1000, 1,000)
+  // Regex: Finds 1-3 digits, optionally followed by groups of ',3 digits' OR finds any single digit group
+  let numMatch = s.match(/(\d{1,3}(,\d{3})*|\d+)/);
+  if (numMatch) {
+      amount = parseInt(numMatch[0].replace(/,/g, ''), 10);
+  }
+  
+  // 2. If no number is found, check for the word 'thousand' to multiply
+  if (!amount) {
+      // Look for number words followed by 'thousand' (e.g., two thousand)
+      const wordMatch = s.match(/\b(one|two|three|four|five|ten|twenty)\s+thousand\b/);
+      if (wordMatch) {
+          const multiplierMap = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'twenty': 20 };
+          const word = wordMatch[1];
+          amount = multiplierMap[word] * 1000;
+      }
+  }
+
 
   // transfer patterns
   if (/\b(send|transfer|pay|give|transfer to|send to)\b/.test(s)) {
@@ -308,7 +336,6 @@ export default function App() {
   };
 
   // ------------------------- Core: send message & process -------------------------
-  // handleSend can accept optional explicitText (used by voice recognition)
   const handleSend = async (explicitText) => {
     const text = explicitText !== undefined ? explicitText : input;
     if (!text || !text.trim()) return;
@@ -327,63 +354,53 @@ export default function App() {
     setIsThinking(true);
 
     try {
-      // system prompt ensures Gemini replies in the same language and avoids JSON being shown
+      // FIX 3: Enhanced System Prompt
       const systemPrompt = `
 You are Owo, a friendly multilingual financial assistant for Nigerian users.
-You understand and respond in English, Nigerian Pidgin, Yoruba, Igbo, and Hausa.
-Always reply in the SAME language as the user's message.
-Do NOT output raw JSON or code blocks to the user. Respond naturally like a human assistant.
+You understand and respond fluently in English, Nigerian Pidgin, Yoruba, Igbo, and Hausa.
+Always reply **naturally and fluently** in the SAME language as the user's message, including appropriate greetings and local phrases.
+Do NOT output raw JSON or code blocks. Respond naturally like a human assistant.
 You can check balance, make transfers, buy airtime, and show transaction history.
 If you need clarification ask a short question in the user's language.
 `;
 
       // build conversation context (last ~10 messages to keep prompt small)
       const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
-      // add the new user turn
-      const inputTurn = `User: ${text}`;
+      const inputTurn = `User (${userLang}): ${text}`;
 
-      // use Gemini if available
       let botReplyText = null;
       const model = getModel("models/gemini-2.5-flash");
       if (model) {
         try {
-          // Pass system prompt + conversation
           const response = await model.generateContent({
             contents: [
               { parts: [{ text: systemPrompt }] },
-              // Note: The structure for sending history can be complex. We simplify by sending the system prompt, history, and current text sequentially.
               { parts: [{ text: shortHistory.join("\n") }] },
               { parts: [{ text: inputTurn }] }
             ],
             model: "models/gemini-2.5-flash"
           });
 
-          // SDK return may vary; try to read text safely
           const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (candidate) botReplyText = candidate;
-          else if (response?.text) botReplyText = response.text; // Some SDK versions might return it directly
+          else if (response?.text) botReplyText = response.text;
           else botReplyText = "Sorry, I couldn't formulate a reply right now.";
         } catch (gErr) {
           console.warn("Gemini call failed, falling back to simulated reply:", gErr);
         }
       }
 
-      // If no bot reply from Gemini, give a polite simulated acknowledgement
       if (!botReplyText) {
         botReplyText = userLang === "pidgin" ? "Okay, make I check am..." : "Alright, let me handle that for you...";
       }
 
-      // Attempt to parse intent from the raw user text (simple heuristics)
       const parsed = parseIntentFromText(text);
-      // Run simulated action if intent exists
       const simulated = runSimulatedAction(userKey, parsed);
 
-      // If an action was performed (simulated returned a non-null string), prefer that reply (so user sees concrete action)
       let finalReply = simulated || botReplyText;
 
       setMessages((prev) => [...prev, { role: "assistant", text: finalReply, lang: userLang }]);
 
-      // Speak reply aloud using TTS in correct style
       await ensureVoicesLoaded();
       speakText(finalReply, userLang);
 
@@ -462,7 +479,7 @@ If you need clarification ask a short question in the user's language.
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your message here (or press Speak)..."
+            placeholder="Type your message here (e.g. Abeg send 2000 to Tunde)"
             onKeyDown={(e) => e.key === "Enter" && handleSend()}
             style={styles.chatInput}
             disabled={isThinking}
