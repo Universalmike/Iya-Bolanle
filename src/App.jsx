@@ -154,56 +154,62 @@ const saveAllUsers = (obj) => {
   localStorage.setItem(USERS_KEY, JSON.stringify(obj));
 };
 
-// ------------------------- Core Action Execution Function -------------------------
+// ------------------------- Core Action Execution Function (NEW SECURE VERSION) -------------------------
 
 // This function executes the transaction based on the structured data provided by Gemini
-const executeToolCall = (userKey, action, amount, recipient, users, setUsers) => {
+const executeToolCall = (userKey, action, amount, recipient, users) => {
+    // NOTE: This function no longer calls setUsers directly.
+    
     const userData = users[userKey];
     if (!userData) return { error: "User account missing." };
     
-    // Helper to update state and storage
-    const saveUserUpdates = (updates) => {
-        const fresh = { ...users, [userKey]: { ...users[userKey], ...updates } };
-        setUsers(fresh);
-        saveAllUsers(fresh);
-        return fresh[userKey];
-    };
+    const currentBalance = userData.balance;
 
     switch (action) {
         case "check_balance":
-            return { balance: userData.balance, message: `Your current balance is ₦${userData.balance}.` };
+            return { 
+                updates: null, 
+                message: `Your current balance is ₦${currentBalance}.` 
+            };
 
         case "transfer": {
             const amt = amount || 0;
             const targetRecipient = recipient || "recipient";
             if (amt <= 0) return { error: "Please specify a valid transfer amount." };
-            if (userData.balance < amt) return { error: "Transaction failed: insufficient funds." };
+            if (currentBalance < amt) return { error: "Transaction failed: insufficient funds." };
             
-            const newBal = userData.balance - amt;
+            const newBal = currentBalance - amt;
             const tx = { type: "Transfer", amount: amt, to: targetRecipient, date: new Date().toLocaleString() };
-            saveUserUpdates({ balance: newBal, transactions: [...userData.transactions, tx] });
-            return { success: true, message: `Transfer of ₦${amt} to ${targetRecipient} completed. New balance: ₦${newBal}.` };
+            
+            return { 
+                updates: { balance: newBal, transactions: [...userData.transactions, tx] }, 
+                message: `Transfer of ₦${amt} to ${targetRecipient} completed. New balance: ₦${newBal}.` 
+            };
         }
 
         case "buy_airtime": {
             const amt = amount || 0;
             if (amt <= 0) return { error: "Please specify airtime amount." };
-            if (userData.balance < amt) return { error: "Transaction failed: insufficient funds." };
+            if (currentBalance < amt) return { error: "Transaction failed: insufficient funds." };
             
-            const newBal = userData.balance - amt;
+            const newBal = currentBalance - amt;
             const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toLocaleString() };
-            saveUserUpdates({ balance: newBal, transactions: [...userData.transactions, tx] });
-            return { success: true, message: `Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.` };
+            
+            return { 
+                updates: { balance: newBal, transactions: [...userData.transactions, tx] }, 
+                message: `Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.` 
+            };
         }
 
         case "show_history": {
             const slice = (userData.transactions || []).slice(-8).reverse();
-            if (!slice.length) return { message: "You have no transactions yet." };
+            if (!slice.length) return { updates: null, message: "You have no transactions yet." };
             
-            const historyText = "Recent transactions:\n" + slice.map(t => 
+            const historyText = "📜 Recent transactions:\n" + slice.map(t => 
                 `${t.date} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`
             ).join("\n");
-            return { history: slice, message: historyText };
+            
+            return { updates: null, message: historyText };
         }
         
         default:
@@ -299,7 +305,7 @@ export default function App() {
     setIsListening(false);
   };
 
-  // ------------------------- Core: send message & process -------------------------
+// ------------------------- Core: send message & process (FINAL SECURE VERSION) -------------------------
   const handleSend = async (explicitText) => {
     const text = explicitText !== undefined ? explicitText : input;
     if (!text || !text.trim()) return;
@@ -311,13 +317,11 @@ export default function App() {
     const userKey = username.trim().toLowerCase();
     const userLang = detectLanguage(text);
 
-    // Initial message from user
     setMessages((prev) => [...prev, { role: "user", text, lang: userLang }]);
     setInput("");
     setIsThinking(true);
 
     try {
-      // FIX: Enhanced System Prompt (Crucial for multilingual function calling)
       const systemPrompt = `
 You are Owo, a friendly multilingual financial assistant for Nigerian users.
 Your goal is to help the user perform financial actions (transfer, check balance, buy airtime) by calling the 'executeFinancialAction' tool.
@@ -338,7 +342,7 @@ If you call the function, use the result to generate a final, natural, localized
       contents = [
           { role: "system", parts: [{ text: systemPrompt }] },
           ...history,
-          ...contents // The current user message
+          ...contents
       ];
 
       // --- STEP 1: Send message with Tool Declaration ---
@@ -348,46 +352,50 @@ If you call the function, use the result to generate a final, natural, localized
               tools: [{ functionDeclarations: [transactionTool.functionDeclarations[0]] }],
           }
       });
-      
-      console.log("Gemini Response 1 (Call or Reply):", response);
+
+      let finalReply = "Sorry, I couldn't process that request.";
+      const candidates = response.candidates || [];
+      const candidate = candidates[0];
 
       // --- Check for Function Call ---
-      if (response.functionCalls && response.functionCalls.length > 0) {
+      if (candidate?.functionCalls && candidate.functionCalls.length > 0) {
         
-        const toolCall = response.functionCalls[0];
+        const toolCall = candidate.functionCalls[0];
         const { action, amount, recipient } = toolCall.args;
         
-        // Execute the actual function (local transaction logic)
-        console.log("Tool execution requested with args:", { action, amount, recipient });
+        // Execute the function (local transaction logic)
+        // NOTE: setUsers is NOT passed here, it is handled after the result.
+        const toolResult = executeToolCall(userKey, action, amount, recipient, users);
         
-        // **IMPORTANT:** Ensure setUsers is passed correctly to keep state updated
-        const toolResult = executeToolCall(userKey, action, amount, recipient, users, setUsers);
+        // *** CRITICAL NEW LOGIC: Apply updates only if the function returned them ***
+        if (toolResult.updates) {
+            const fresh = { ...users, [userKey]: { ...users[userKey], ...toolResult.updates } };
+            setUsers(fresh);
+            saveAllUsers(fresh);
+        }
         
-        console.log("Tool execution result:", toolResult);
-
         // --- STEP 2: Send the Tool Result back to the model ---
         
-        // The Model's turn (The function call itself)
+        // Model's turn (The function call itself, using the part returned from API)
         const modelFunctionCallTurn = {
             role: "model",
-            // The structure MUST match what Gemini returned
-            parts: [{ functionCall: toolCall }] 
+            parts: candidate.content.parts
         };
         
-        // The Function's turn (The result from our code)
+        // Function's turn (The result from our code, including the message)
         const functionResponseContent = {
             role: "function",
             parts: [{
                 functionResponse: {
                     name: toolCall.name,
-                    response: toolResult,
+                    response: { message: toolResult.message || toolResult.error },
                 },
             }],
         };
         
         // Assemble the complete history for the final call
         const secondCallContents = [
-            ...contents, // All previous history up to the user's message
+            ...contents,
             modelFunctionCallTurn,
             functionResponseContent
         ];
@@ -399,22 +407,22 @@ If you call the function, use the result to generate a final, natural, localized
                 tools: [{ functionDeclarations: [transactionTool.functionDeclarations[0]] }],
             }
         });
+        
+        finalReply = response?.text || "Sorry, I received the result but couldn't generate a final reply.";
 
-        console.log("Gemini Response 2 (Final Reply):", response);
+      } else {
+          // No function call was needed (e.g., general question), use the first response text
+          finalReply = response?.text || finalReply;
       }
-      
-      // Use the text from the single response or the final second response
-      const finalReply = response?.text || "Sorry, I couldn't process that request.";
 
       setMessages((prev) => [...prev, { role: "assistant", text: finalReply, lang: userLang }]);
       await ensureVoicesLoaded();
       speakText(finalReply, userLang);
 
     } catch (err) {
-      // This is now the key debugging spot!
-      console.error("Chat/Function Calling Error:", err);
-      // Fallback message, we will rely on the console error for details
-      setMessages((prev) => [...prev, { role: "assistant", text: "Sorry, a transaction error occurred.", lang: "english" }]);
+      console.error("Chat/Function Calling CRITICAL ERROR:", err);
+      // The most common error here is the API structure (Cause 2) or network (Cause 1).
+      setMessages((prev) => [...prev, { role: "assistant", text: "Sorry, a transaction error occurred. Please check the console for details.", lang: "english" }]);
     } finally {
       setIsThinking(false);
     }
