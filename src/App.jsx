@@ -345,9 +345,11 @@ If you call the function, use the result to generate a final, natural, localized
       let response = await model.generateContent({
           contents: contents,
           config: {
-              tools: [transactionTool],
+              tools: [{ functionDeclarations: [transactionTool.functionDeclarations[0]] }],
           }
       });
+      
+      console.log("Gemini Response 1 (Call or Reply):", response);
 
       // --- Check for Function Call ---
       if (response.functionCalls && response.functionCalls.length > 0) {
@@ -356,9 +358,23 @@ If you call the function, use the result to generate a final, natural, localized
         const { action, amount, recipient } = toolCall.args;
         
         // Execute the actual function (local transaction logic)
+        console.log("Tool execution requested with args:", { action, amount, recipient });
+        
+        // **IMPORTANT:** Ensure setUsers is passed correctly to keep state updated
         const toolResult = executeToolCall(userKey, action, amount, recipient, users, setUsers);
         
+        console.log("Tool execution result:", toolResult);
+
         // --- STEP 2: Send the Tool Result back to the model ---
+        
+        // The Model's turn (The function call itself)
+        const modelFunctionCallTurn = {
+            role: "model",
+            // The structure MUST match what Gemini returned
+            parts: [{ functionCall: toolCall }] 
+        };
+        
+        // The Function's turn (The result from our code)
         const functionResponseContent = {
             role: "function",
             parts: [{
@@ -369,22 +385,25 @@ If you call the function, use the result to generate a final, natural, localized
             }],
         };
         
-        // Add the tool response to the history for the second call
+        // Assemble the complete history for the final call
         const secondCallContents = [
-            ...contents,
-            { role: "model", parts: [{ functionCall: toolCall }] }, // Include the call Gemini just made
-            functionResponseContent // Include the result from our code
+            ...contents, // All previous history up to the user's message
+            modelFunctionCallTurn,
+            functionResponseContent
         ];
         
         // Make the second call to get the final localized, human-friendly response
         response = await model.generateContent({
             contents: secondCallContents,
             config: {
-                tools: [transactionTool],
+                tools: [{ functionDeclarations: [transactionTool.functionDeclarations[0]] }],
             }
         });
-      }
 
+        console.log("Gemini Response 2 (Final Reply):", response);
+      }
+      
+      // Use the text from the single response or the final second response
       const finalReply = response?.text || "Sorry, I couldn't process that request.";
 
       setMessages((prev) => [...prev, { role: "assistant", text: finalReply, lang: userLang }]);
@@ -392,7 +411,9 @@ If you call the function, use the result to generate a final, natural, localized
       speakText(finalReply, userLang);
 
     } catch (err) {
-      console.error("Chat error:", err);
+      // This is now the key debugging spot!
+      console.error("Chat/Function Calling Error:", err);
+      // Fallback message, we will rely on the console error for details
       setMessages((prev) => [...prev, { role: "assistant", text: "Sorry, a transaction error occurred.", lang: "english" }]);
     } finally {
       setIsThinking(false);
