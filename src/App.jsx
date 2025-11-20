@@ -1,310 +1,588 @@
-// src/App.jsx
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { initializeApp } from "firebase/app";
-import {
-  getFirestore,
-  doc,
-  setDoc,
-  getDoc,
-  updateDoc,
-  arrayUnion,
-  serverTimestamp
-} from "firebase/firestore";
-import { getBalance, sendTransfer, buyAirtime } from "./flutterwave";
 
-/* --------------------------- Config & Init --------------------------- */
-// Gemini client
+/**
+ * IMPORTANT:
+ * - Ensure you installed: npm install @google/generative-ai
+ * - Set env var: VITE_GEMINI_API_KEY=your_key_here
+ */
+
+// ------------------------- Gemini init -------------------------
 let genAI = null;
 try {
   const key = import.meta.env.VITE_GEMINI_API_KEY;
-  if (key) genAI = new GoogleGenerativeAI(key);
-  else console.warn("VITE_GEMINI_API_KEY missing — running in simulated mode.");
-} catch (e) {
-  console.warn("Gemini init error:", e);
-  genAI = null;
-}
-
-// Firebase init
-let firestore = null;
-try {
-  const raw = import.meta.env.VITE_FIREBASE_CONFIG || "";
-  const cfg = raw ? JSON.parse(raw) : null;
-  if (cfg && cfg.apiKey) {
-    const app = initializeApp(cfg);
-    firestore = getFirestore(app);
+  if (key) {
+    genAI = new GoogleGenerativeAI(key);
   } else {
-    console.warn("VITE_FIREBASE_CONFIG missing/invalid — Firestore disabled.");
+    console.warn("VITE_GEMINI_API_KEY missing — running in simulated mode.");
   }
 } catch (e) {
-  console.warn("Firebase init error:", e);
-  firestore = null;
+  console.warn("Gemini init failed — running simulated mode.", e);
 }
 
-// Gemini model helper
-const getModel = (name = "models/gemini-2.5-flash") => {
+// Helper to get model instance (safe)
+const getModel = (modelName = "models/gemini-2.5-flash") => {
   if (!genAI) return null;
-  try { return genAI.getGenerativeModel({ model: name }); }
-  catch (e) { console.warn("getGenerativeModel error:", e); return null; }
+  try {
+    return genAI.getGenerativeModel({ model: modelName });
+  } catch (e) {
+    console.warn("getGenerativeModel failed:", e);
+    return null;
+  }
 };
 
-/* --------------------------- Utilities --------------------------- */
-// Language mapping
-const LANG_TO_LOCALE = { english: "en-NG", pidgin: "pcm-NG", yoruba: "yo-NG", igbo: "ig-NG", hausa: "ha-NG" };
-
-// Detect language from keywords
+// ------------------------- Util: Language & Text Helpers -------------------------
 const detectLanguage = (text = "") => {
-  const s = (text || "").toLowerCase();
-  if (/\b(abeg|wey|una|omo|make i|make we|i go|i go do)\b/.test(s)) return "pidgin";
-  if (/[ṣọẹọ́àèìòùẹ]/.test(s) || /\b(mi |mi o|kin ni|se|owo|bawo|emi)\b/.test(s)) return "yoruba";
-  if (/\b(biko|nna|nne|ego|kedu|onye)\b/.test(s) || /ị|ọ/.test(s)) return "igbo";
-  if (/\b(kai|ina|yaya|sannu|don allah|wallahi)\b/.test(s)) return "hausa";
+  if (!text) return "english";
+  const s = text.toLowerCase();
+
+  // pidgin keywords
+  if (/\b(abeg|wey|una|omi|omo|i go|i go do|na)\b/.test(s)) return "pidgin";
+
+  // yoruba detection (common characters / words)
+  if (/[ṣọạẹẹọẹọ́àèìòùẹ]/.test(s) || /\b(mi |mi o|kin ni|se|owo|abẹ|gba)\b/.test(s)) return "yoruba";
+
+  // igbo detection
+  if (/\b(biko|nna|nne|ego|kedu|ime|onye)\b/.test(s) || /ị|ịbụ|ọzọ/.test(s)) return "igbo";
+
+  // hausa detection
+  if (/\b(kai|ina|yaya|sannu|don Allah|wallahi)\b/.test(s)) return "hausa";
+
+  // default english
   return "english";
 };
 
-// Pick best voice for TTS
-const pickVoiceForLocale = (locale) => {
+// FIX 1: Utility to strip emojis from text for TTS
+const stripEmojis = (text) => {
+  // Regex matches various unicode ranges commonly used for emojis and symbols
+  return text.replace(/(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g, '');
+};
+
+// ------------------------- TTS voice picker & helpers -------------------------
+const pickVoiceForLanguage = (lang) => {
   const voices = window.speechSynthesis.getVoices() || [];
   if (!voices.length) return null;
-  const exact = voices.find(v => v.lang && v.lang.toLowerCase().includes(locale.toLowerCase()));
-  if (exact) return exact;
-  const pref = voices.find(v => v.lang && (v.lang.toLowerCase().includes("en-ng") || v.lang.toLowerCase().includes("en-gb")));
-  if (pref) return pref;
-  return voices.find(v => v.lang && v.lang.toLowerCase().includes("en-us")) || voices[0];
+
+  const findPrefer = (pattern) =>
+    voices.find((v) => v.lang && v.lang.toLowerCase().includes(pattern));
+
+  // prefer Nigerian-en when available (en-ng)
+  if (lang === "pidgin" || lang === "yoruba" || lang === "igbo" || lang === "hausa") {
+    return findPrefer("en-ng") || findPrefer("en-gb") || voices[0];
+  }
+
+  // english default: en-us > en-gb
+  return findPrefer("en-us") || findPrefer("en-gb") || voices[0];
 };
 
-// Ensure voices loaded
-const ensureVoicesLoaded = () => new Promise(res => {
-  const v = window.speechSynthesis.getVoices();
-  if (v && v.length) return res(true);
-  window.speechSynthesis.onvoiceschanged = () => res(true);
-  setTimeout(() => res(!!window.speechSynthesis.getVoices().length), 1200);
-});
-
-// Clean text for TTS
-const cleanForSpeech = (text) => text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/[^\p{L}\p{N}\p{P}\p{Zs}]/gu, "").trim();
-
-// Speak text
-const speakText = async (text, languageKey = "english") => {
+const speakText = (text, lang = "english", opts = {}) => {
   if (!("speechSynthesis" in window)) return;
-  const clean = cleanForSpeech(text);
-  if (!clean) return;
-  await ensureVoicesLoaded();
   try {
     window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(clean);
-    const locale = LANG_TO_LOCALE[languageKey] || "en-NG";
-    const voice = pickVoiceForLocale(locale);
+    
+    // FIX 1: Clean the text before speaking
+    const cleanText = stripEmojis(text); 
+    const utter = new SpeechSynthesisUtterance(cleanText);
+
+    // set voice & lang code if possible
+    const voice = pickVoiceForLanguage(lang);
     if (voice) utter.voice = voice;
-    switch (languageKey) {
-      case "yoruba": utter.rate = 0.95; utter.pitch = 1.1; break;
-      case "hausa": utter.rate = 0.95; utter.pitch = 0.95; break;
-      case "igbo": utter.rate = 1.0; utter.pitch = 1.05; break;
-      case "pidgin": utter.rate = 0.98; utter.pitch = 1.0; break;
-      default: utter.rate = 1.0; utter.pitch = 1.0;
+
+    // tune rate/pitch roughly per language to mimic cadence
+    switch (lang) {
+      case "yoruba":
+        utter.rate = opts.rate ?? 0.92;
+        utter.pitch = opts.pitch ?? 1.05;
+        break;
+      case "hausa":
+        utter.rate = opts.rate ?? 0.95;
+        utter.pitch = opts.pitch ?? 0.95;
+        break;
+      case "igbo":
+        utter.rate = opts.rate ?? 1.0;
+        utter.pitch = opts.pitch ?? 1.05;
+        break;
+      case "pidgin":
+        utter.rate = opts.rate ?? 0.98;
+        utter.pitch = opts.pitch ?? 1.0;
+        break;
+      default:
+        utter.rate = opts.rate ?? 1.0;
+        utter.pitch = opts.pitch ?? 1.0;
     }
+
     window.speechSynthesis.speak(utter);
-  } catch (e) { console.warn("TTS failed:", e); }
-};
-
-/* --------------------------- Firestore helpers --------------------------- */
-const USERS_COLLECTION = "owo_users";
-const userDocRef = (username) => firestore ? doc(firestore, USERS_COLLECTION, username) : null;
-
-const createUserIfMissing = async (username) => {
-  if (!firestore) return { balance: 10000, transactions: [] };
-  const ref = userDocRef(username);
-  try {
-    const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      const initial = { balance: 10000, transactions: [], createdAt: serverTimestamp() };
-      await setDoc(ref, initial);
-      return initial;
-    }
-    return snap.data();
-  } catch (e) { console.warn("Firestore createUserIfMissing error:", e); return null; }
-};
-
-const saveTransaction = async (username, tx, newBalance) => {
-  if (!firestore) return false;
-  const ref = userDocRef(username);
-  try {
-    const updatePayload = { transactions: arrayUnion(tx) };
-    if (typeof newBalance === "number") updatePayload.balance = newBalance;
-    await updateDoc(ref, updatePayload);
-    return true;
   } catch (e) {
-    console.warn("Firestore saveTransaction error:", e);
-    return false;
+    console.warn("TTS failed:", e);
   }
 };
 
-const fetchUserData = async (username) => {
-  if (!firestore) return null;
+// ensure voices loaded in some browsers
+const ensureVoicesLoaded = () => {
+  return new Promise((res) => {
+    const voices = window.speechSynthesis.getVoices();
+    if (voices && voices.length) return res(true);
+    window.speechSynthesis.onvoiceschanged = () => res(true);
+    // fallback timeout
+    setTimeout(() => res(!!window.speechSynthesis.getVoices().length), 1500);
+  });
+};
+
+// ------------------------- localStorage user data helpers -------------------------
+const USERS_KEY = "owo_users_v1";
+
+const loadAllUsers = () => {
   try {
-    const snap = await getDoc(userDocRef(username));
-    return snap.exists() ? snap.data() : null;
-  } catch (e) { console.warn("Firestore fetchUserData error:", e); return null; }
+    const raw = localStorage.getItem(USERS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    console.error("Failed to parse users data:", e);
+    return {};
+  }
 };
 
-/* --------------------------- Intent parser --------------------------- */
-const parseIntent = (text) => {
-  const s = (text || "").toLowerCase();
-  const num = s.match(/\b(\d{2,}|[0-9]+)\b/);
-  const amount = num ? parseInt(num[0].replace(/[^\d]/g, ""), 10) : null;
+const saveAllUsers = (obj) => {
+  localStorage.setItem(USERS_KEY, JSON.stringify(obj));
+};
 
-  if (/\b(send|transfer|pay|give)\b/.test(s)) {
-    const toMatch = s.match(/\b(?:to|for)\s+([A-Za-z0-9_]+)/);
-    return { intent: "transfer", amount, recipient: toMatch ? toMatch[1] : null };
+// ------------------------- Intent extraction (simple heuristics) -------------------------
+const parseIntentFromText = (text) => {
+  const s = text.toLowerCase();
+  
+  // FIX 2: Robust number parsing (handling commas and simple number words)
+  let amount = null;
+  
+  // 1. Try to find a number written in digits (handling commas: 1000, 1,000)
+  // Regex: Finds 1-3 digits, optionally followed by groups of ',3 digits' OR finds any single digit group
+  let numMatch = s.match(/(\d{1,3}(,\d{3})*|\d+)/);
+  if (numMatch) {
+      amount = parseInt(numMatch[0].replace(/,/g, ''), 10);
   }
-  if (/\b(airtime|recharge|top ?up)\b/.test(s)) return { intent: "buy_airtime", amount, recipient: null };
-  if (/\b(balance|remain|how much|wetin be my balance|kin ni balance)\b/.test(s)) return { intent: "check_balance" };
-  if (/\b(history|transactions|show transactions)\b/.test(s)) return { intent: "show_transaction_history" };
+  
+  // 2. If no number is found, check for the word 'thousand' to multiply
+  if (!amount) {
+      // Look for number words followed by 'thousand' (e.g., two thousand)
+      const wordMatch = s.match(/\b(one|two|three|four|five|ten|twenty)\s+thousand\b/);
+      if (wordMatch) {
+          const multiplierMap = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'twenty': 20 };
+          const word = wordMatch[1];
+          amount = multiplierMap[word] * 1000;
+      }
+  }
+
+
+  // transfer patterns
+  if (/\b(send|transfer|pay|give|transfer to|send to)\b/.test(s)) {
+    // recipient heuristics: "to NAME" or "give NAME"
+    const toMatch = s.match(/\b(?:to|give|for)\s+([A-Za-z0-9_]+)/);
+    const recipient = toMatch ? toMatch[1] : "recipient";
+    return { intent: "transfer", amount, recipient };
+  }
+
+  // airtime
+  if (/\b(airtime|recharge|top ?up)\b/.test(s)) {
+    return { intent: "buy_airtime", amount, recipient: null };
+  }
+
+  // balance
+  if (/\b(balance|how much|how many|remain|wetin be my balance|kin ni balance)\b/.test(s)) {
+    return { intent: "check_balance" };
+  }
+
+  // transactions/history
+  if (/\b(history|transactions|last transactions|transaction history|show transactions)\b/.test(s)) {
+    return { intent: "show_transaction_history" };
+  }
+
   return { intent: null };
 };
 
-/* --------------------------- App Component --------------------------- */
+// ------------------------- Main App component -------------------------
 export default function App() {
+  // user/session state
   const [username, setUsername] = useState("");
-  const [loggedInAs, setLoggedInAs] = useState(null);
-  const [userState, setUserState] = useState({ balance: 0, transactions: [] });
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const recognitionRef = useRef(null);
-  const [listening, setListening] = useState(false);
-  const bottomRef = useRef(null);
-  useEffect(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), [messages, loading]);
-  useEffect(() => { ensureVoicesLoaded(); }, []);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [users, setUsers] = useState(() => loadAllUsers());
 
-  // Login handler
-  const handleLogin = async () => {
-    const name = (username || "").trim().toLowerCase();
-    if (!name) return alert("Enter a username");
-    setLoading(true);
-    const data = await createUserIfMissing(name);
-    if (data) {
-      setLoggedInAs(name);
-      setUserState({ balance: data.balance || 0, transactions: data.transactions || [] });
-      const welcome = `Welcome ${name}. How can I help you today?`;
-      setMessages([{ role: "assistant", text: welcome, lang: "english" }]);
-      speakText(welcome, "english");
+  // chat state
+  const [messages, setMessages] = useState([]); // {role: 'user'|'assistant', text: '', lang }
+  const [input, setInput] = useState("");
+  const [isThinking, setIsThinking] = useState(false);
+
+  // speech recognition refs
+  const recognitionRef = useRef(null);
+  const [isListening, setIsListening] = useState(false);
+
+  // ensure voices loaded on mount
+  useEffect(() => {
+    ensureVoicesLoaded();
+    // greet
+    speakText("Owo ready. Please login to continue.", "english");
+  }, []);
+
+  // ------------------------- User management -------------------------
+  const ensureUserExists = (name) => {
+    const clean = name.trim().toLowerCase();
+    const existing = users[clean];
+    if (!existing) {
+      const newUsers = {
+        ...users,
+        [clean]: { balance: 10000, transactions: [] }, // start balance ₦10,000
+      };
+      setUsers(newUsers);
+      saveAllUsers(newUsers);
+      return newUsers[clean];
     }
-    setLoading(false);
+    return existing;
   };
 
-  /* --------------------------- Voice input --------------------------- */
+  const handleLogin = () => {
+    if (!username.trim()) return alert("Enter a username to continue");
+    const clean = username.trim().toLowerCase();
+    ensureUserExists(clean);
+    setIsLoggedIn(true);
+    setMessages([{ role: "assistant", text: `👋 Welcome ${clean}. How can I help you today?`, lang: "english" }]);
+    speakText(`Welcome ${clean}. How can I help you today?`, "english");
+  };
+
+  // ------------------------- Speech recognition (voice input) -------------------------
   const startListening = useCallback(() => {
-    if (!("SpeechRecognition" in window) && !("webkitSpeechRecognition" in window)) {
-      setMessages(prev => [...prev, { role: "assistant", text: "Voice input not supported.", lang: "english" }]);
+    if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
+      setMessages((prev) => [...prev, { role: "assistant", text: "Voice input not supported in this browser.", lang: "english" }]);
       return;
     }
+
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const rec = new SpeechRecognition();
-    rec.lang = "en-NG"; // Use English/Nigerian accent; could be dynamic per lang
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
-    rec.onstart = () => setListening(true);
-    rec.onresult = (evt) => {
-      const text = evt.results[0][0].transcript;
-      setListening(false); rec.stop(); setInput(text); handleSend(text);
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-NG"; // Accept Nigerian English
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      setIsListening(true);
     };
-    rec.onerror = () => { setListening(false); rec.stop(); };
-    rec.onend = () => setListening(false);
-    recognitionRef.current = rec;
-    rec.start();
-  }, [messages, loggedInAs, userState]);
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setIsListening(false);
+      recognition.stop();
+      setInput(transcript);
+      // auto-send
+      handleSend(transcript);
+    };
+    recognition.onerror = (e) => {
+      console.error("Speech recognition error:", e);
+      setIsListening(false);
+      setMessages((prev) => [...prev, { role: "assistant", text: "Voice input failed. Try typing.", lang: "english" }]);
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+    };
 
-  const stopListening = () => { try { recognitionRef.current?.stop(); } catch {} setListening(false); };
+    recognitionRef.current = recognition;
+    recognition.start();
+  }, [messages, users, username]);
 
-  /* --------------------------- Core send --------------------------- */
-  const handleSend = async (explicitText) => {
-    const text = ((explicitText ?? input) || "").trim();
-    if (!text || !loggedInAs) return;
-    const langKey = detectLanguage(text);
-    setMessages(prev => [...prev, { role: "user", text, lang: langKey }]);
-    setInput(""); setLoading(true);
-
-    // Gemini AI
-    const systemPrompt = `
-You are Owo, a kind multilingual financial assistant for Nigerian users.
-Reply in SAME language. Never output JSON or code blocks.
-Check balance, transfer, buy airtime, show history.
-`;
-
-    const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
-    const model = getModel("models/gemini-2.5-flash");
-    let modelReply = null;
-
-    if (model) {
-      try {
-        const response = await model.generateContent({
-          contents: [
-            { parts: [{ text: systemPrompt }] },
-            { parts: [{ text: shortHistory.join("\n") }] },
-            { parts: [{ text }] }
-          ],
-          model: "models/gemini-2.5-flash"
-        });
-        modelReply = response?.candidates?.[0]?.content?.parts?.[0]?.text || "Okay, working on it...";
-      } catch { modelReply = "Okay, working on it..."; }
-    } else { modelReply = "Alright — I'm working on that."; }
-
-    // Intent parsing
-    const parsed = parseIntent(text);
-    let finalReply = modelReply;
-
-    if (parsed.intent) {
-      let currentBal = await getBalance(loggedInAs) ?? userState.balance ?? 10000;
-
-      if (parsed.intent === "check_balance") finalReply = `Your balance is ₦${currentBal}.`;
-      else if (parsed.intent === "transfer") {
-        const amt = parsed.amount || 0;
-        if (!amt) finalReply = "Please specify a valid amount to transfer.";
-        else {
-          const result = await sendTransfer(parsed.recipient, "044", amt); // Example bank code
-          finalReply = result?.status === "success" ? `Transfer of ₦${amt} successful.` : `Transfer failed: ${result?.message || "Error"}`;
-        }
-      }
-      else if (parsed.intent === "buy_airtime") {
-        const amt = parsed.amount || 0;
-        const result = await buyAirtime("08012345678", amt); // Example phone
-        finalReply = result?.status === "success" ? `Airtime purchase of ₦${amt} successful.` : `Airtime failed: ${result?.message || "Error"}`;
-      }
-      else if (parsed.intent === "show_transaction_history") {
-        const latestData = await fetchUserData(loggedInAs) || userState;
-        const txs = latestData.transactions || [];
-        finalReply = txs.length ? txs.slice(-8).reverse().map(t => `${t.date} — ${t.type} — ₦${t.amount}`).join("\n") : "No transactions yet.";
-      }
-    }
-
-    setMessages(prev => [...prev, { role: "assistant", text: finalReply, lang: langKey }]);
-    await speakText(finalReply, langKey);
-    setLoading(false);
+  const stopListening = () => {
+    try {
+      recognitionRef.current?.stop();
+    } catch (e) {}
+    setIsListening(false);
   };
 
-  /* --------------------------- UI --------------------------- */
-  if (!loggedInAs) return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: 20 }}>
-      <h2>Owo — Financial Assistant</h2>
-      <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" />
-      <button onClick={handleLogin}>{loading ? "Loading..." : "Login"}</button>
-    </div>
-  );
+  // ------------------------- Simulated transaction actions -------------------------
+  const saveUserUpdates = (userKey, updates) => {
+    const fresh = { ...users, [userKey]: { ...users[userKey], ...updates } };
+    setUsers(fresh);
+    saveAllUsers(fresh);
+  };
+
+  const runSimulatedAction = (userKey, parsedIntent) => {
+    const userData = users[userKey];
+    if (!userData) return "User account missing.";
+
+    const { intent, amount, recipient } = parsedIntent;
+
+    if (intent === "check_balance") {
+      return `💰 Your balance is ₦${userData.balance}.`;
+    }
+
+    if (intent === "transfer") {
+      const amt = amount || 0;
+      if (amt <= 0) return "Please specify a valid amount.";
+      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
+      const newBal = userData.balance - amt;
+      const tx = { type: "Transfer", amount: amt, to: recipient || "recipient", date: new Date().toLocaleString() };
+      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
+      return `✅ Transfer of ₦${amt} to ${recipient || "recipient"} completed. New balance: ₦${newBal}.`;
+    }
+
+    if (intent === "buy_airtime") {
+      const amt = amount || 0;
+      if (amt <= 0) return "Please specify airtime amount.";
+      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
+      const newBal = userData.balance - amt;
+      const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toLocaleString() };
+      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
+      return `📱 Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`;
+    }
+
+    if (intent === "show_transaction_history") {
+      const slice = (userData.transactions || []).slice(-8).reverse();
+      if (!slice.length) return "You have no transactions yet.";
+      return "📜 Recent transactions:\n" + slice.map(t => `${t.date} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
+    }
+
+    return null;
+  };
+
+  // ------------------------- Core: send message & process -------------------------
+  const handleSend = async (explicitText) => {
+    const text = explicitText !== undefined ? explicitText : input;
+    if (!text || !text.trim()) return;
+    if (!isLoggedIn) {
+      setMessages((prev) => [...prev, { role: "assistant", text: "Please login first.", lang: "english" }]);
+      return;
+    }
+
+    const userKey = username.trim().toLowerCase();
+
+    // append user message
+    const userLang = detectLanguage(text);
+    setMessages((prev) => [...prev, { role: "user", text, lang: userLang }]);
+    setInput("");
+
+    setIsThinking(true);
+
+    try {
+      // FIX 3: Enhanced System Prompt
+      const systemPrompt = `
+You are Owo, a friendly multilingual financial assistant for Nigerian users.
+You understand and respond fluently in English, Nigerian Pidgin, Yoruba, Igbo, and Hausa.
+Always reply **naturally and fluently** in the SAME language as the user's message, including appropriate greetings and local phrases.
+Do NOT output raw JSON or code blocks. Respond naturally like a human assistant.
+You can check balance, make transfers, buy airtime, and show transaction history.
+If you need clarification ask a short question in the user's language.
+`;
+
+      // build conversation context (last ~10 messages to keep prompt small)
+      const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
+      const inputTurn = `User (${userLang}): ${text}`;
+
+      let botReplyText = null;
+      const model = getModel("models/gemini-2.5-flash");
+      if (model) {
+        try {
+          const response = await model.generateContent({
+            contents: [
+              { parts: [{ text: systemPrompt }] },
+              { parts: [{ text: shortHistory.join("\n") }] },
+              { parts: [{ text: inputTurn }] }
+            ],
+            model: "models/gemini-2.5-flash"
+          });
+
+          const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (candidate) botReplyText = candidate;
+          else if (response?.text) botReplyText = response.text;
+          else botReplyText = "Sorry, I couldn't formulate a reply right now.";
+        } catch (gErr) {
+          console.warn("Gemini call failed, falling back to simulated reply:", gErr);
+        }
+      }
+
+      if (!botReplyText) {
+        botReplyText = userLang === "pidgin" ? "Okay, make I check am..." : "Alright, let me handle that for you...";
+      }
+
+      const parsed = parseIntentFromText(text);
+      const simulated = runSimulatedAction(userKey, parsed);
+
+      let finalReply = simulated || botReplyText;
+
+      setMessages((prev) => [...prev, { role: "assistant", text: finalReply, lang: userLang }]);
+
+      await ensureVoicesLoaded();
+      speakText(finalReply, userLang);
+
+    } catch (err) {
+      console.error("Chat error:", err);
+      setMessages((prev) => [...prev, { role: "assistant", text: "Sorry, something went wrong.", lang: "english" }]);
+    } finally {
+      setIsThinking(false);
+    }
+  };
+
+  // UI helpers
+  const lastMsgsRef = useRef(null);
+  useEffect(() => {
+    // auto-scroll
+    lastMsgsRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isThinking]);
+
+  // ------------------------- Render -------------------------
+  if (!isLoggedIn) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.card}>
+          <h2 style={styles.title}>💸 Owo — Personal Financial Assistant</h2>
+          <input
+            placeholder="Enter username (e.g. michael)"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            style={styles.input}
+          />
+          <button onClick={handleLogin} style={styles.buttonPrimary}>Continue</button>
+          <p style={{ marginTop: 12, color: "#cfcfcf" }}>
+            Data is stored locally in your browser. Each username has private balance & history.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const userKey = username.trim().toLowerCase();
+  const userData = users[userKey] || { balance: 0, transactions: [] };
 
   return (
-    <div style={{ padding: 20 }}>
-      <h3>Owo</h3>
-      <div>Logged in as {loggedInAs} • ₦{userState.balance}</div>
-      <div style={{ maxHeight: 400, overflowY: "auto" }}>
-        {messages.map((m, i) => <div key={i} style={{ textAlign: m.role === "user" ? "right" : "left" }}>{m.text}</div>)}
-        <div ref={bottomRef}></div>
-      </div>
-      <div style={{ marginTop: 10 }}>
-        <button onClick={() => (listening ? stopListening() : startListening())}>{listening ? "Listening..." : "Speak"}</button>
-        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && handleSend()} placeholder="Type here..." />
-        <button onClick={() => handleSend()}>Send</button>
+    <div style={styles.container}>
+      <div style={{ ...styles.card, width: 820, maxWidth: "95%" }}>
+        <div style={styles.header}>
+          <div>
+            <h2 style={{ margin: 0 }}>💬 Owo — Multilingual Financial Assistant</h2>
+            <div style={{ fontSize: 13, color: "#cfcfcf" }}>Logged in as <b>{userKey}</b> • ₦{userData.balance}</div>
+          </div>
+          <div>
+            <button style={styles.smallButton} onClick={() => { navigator.clipboard?.writeText(window.location.href); }}>Copy Link</button>
+          </div>
+        </div>
+
+        <div style={styles.chatWindow}>
+          {messages.map((m, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 8 }}>
+              <div style={{ ...styles.bubble, background: m.role === "user" ? "#6b21a8" : "#1f2937", color: "#fff", maxWidth: "78%" }}>
+                <div style={{ fontSize: 13, opacity: 0.9 }}>{m.text}</div>
+              </div>
+            </div>
+          ))}
+          <div ref={lastMsgsRef} />
+        </div>
+
+        <div style={styles.controls}>
+          <button
+            title={isListening ? "Listening..." : "Start voice input"}
+            onClick={() => (isListening ? stopListening() : startListening())}
+            style={{ ...styles.micButton, background: isListening ? "#ef4444" : "#111827" }}
+          >
+            {isListening ? "● Listening" : "🎤 Speak"}
+          </button>
+
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Type your message here (e.g. Abeg send 2000 to Tunde)"
+            onKeyDown={(e) => e.key === "Enter" && handleSend()}
+            style={styles.chatInput}
+            disabled={isThinking}
+          />
+
+          <button onClick={() => handleSend()} style={styles.buttonPrimary} disabled={isThinking}>
+            {isThinking ? "Thinking..." : "Send"}
+          </button>
+        </div>
+
+        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ fontSize: 12, color: "#cfcfcf" }}>Quick examples:</div>
+          <button style={styles.tag} onClick={() => { setInput("Check my balance"); setTimeout(() => handleSend(), 50); }}>Check my balance</button>
+          <button style={styles.tag} onClick={() => { setInput("Abeg send 2000 to Tunde"); setTimeout(() => handleSend(), 50); }}>Abeg send 2000 to Tunde</button>
+          <button style={styles.tag} onClick={() => { setInput("Help me buy 100 airtime"); setTimeout(() => handleSend(), 50); }}>Buy airtime 100</button>
+          <button style={styles.tag} onClick={() => { setInput("Show my transaction history"); setTimeout(() => handleSend(), 50); }}>Show history</button>
+        </div>
       </div>
     </div>
   );
 }
+
+// ------------------------- Simple inline styles -------------------------
+const styles = {
+  container: {
+    minHeight: "100vh",
+    background: "linear-gradient(180deg,#0f172a 0%, #060818 100%)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+    color: "#fff",
+    fontFamily: "Inter, system-ui, sans-serif",
+  },
+  card: {
+    width: 900,
+    maxWidth: "95%",
+    background: "#0b1220",
+    borderRadius: 12,
+    padding: 18,
+    boxShadow: "0 10px 30px rgba(2,6,23,0.8)",
+  },
+  title: {
+    marginBottom: 10,
+  },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
+  chatWindow: {
+    height: "55vh",
+    overflowY: "auto",
+    padding: 12,
+    borderRadius: 8,
+    background: "#081127",
+    border: "1px solid rgba(255,255,255,0.02)",
+    marginBottom: 12,
+  },
+  bubble: {
+    padding: 12,
+    borderRadius: 10,
+    lineHeight: 1.3,
+    whiteSpace: "pre-wrap",
+  },
+  controls: { display: "flex", gap: 8, alignItems: "center" },
+  chatInput: {
+    flex: 1,
+    minWidth: 0,
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.06)",
+    background: "#0b1220",
+    color: "#fff",
+  },
+  buttonPrimary: {
+    padding: "10px 14px",
+    borderRadius: 8,
+    border: "none",
+    background: "#7c3aed",
+    color: "#fff",
+    cursor: "pointer",
+  },
+  smallButton: {
+    padding: "6px 8px",
+    borderRadius: 6,
+    background: "#0f172a",
+    color: "#fff",
+    border: "1px solid rgba(255,255,255,0.04)",
+    cursor: "pointer",
+  },
+  micButton: {
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: "none",
+    background: "#111827",
+    color: "#fff",
+    cursor: "pointer",
+    minWidth: 110,
+  },
+  tag: {
+    background: "#111827",
+    border: "1px solid rgba(255,255,255,0.03)",
+    padding: "6px 8px",
+    borderRadius: 6,
+    cursor: "pointer",
+    color: "#cfcfcf",
+    fontSize: 13,
+  },
+};
