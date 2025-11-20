@@ -219,7 +219,7 @@ export default function App() {
 
   /* --------------------------- Core send --------------------------- */
   const handleSend = async (explicitText) => {
-    const text = (explicitText ?? input || "").trim();
+    const text = ((explicitText ?? input) || "").trim();
     if (!text || !loggedInAs) return;
     const langKey = detectLanguage(text);
     setMessages(prev => [...prev, { role: "user", text, lang: langKey }]);
