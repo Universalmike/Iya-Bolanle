@@ -12,179 +12,203 @@ import {
   serverTimestamp
 } from "firebase/firestore";
 
-/* ------------------ Config & Initialization ------------------ */
-
-// Gemini init (safe)
+/* --------------------------- Config & Init --------------------------- */
+// Gemini client (safe)
 let genAI = null;
 try {
   const key = import.meta.env.VITE_GEMINI_API_KEY;
-  if (key) {
-    genAI = new GoogleGenerativeAI(key);
-  } else {
-    console.warn("VITE_GEMINI_API_KEY missing — running with simulated replies.");
-  }
+  if (key) genAI = new GoogleGenerativeAI(key);
+  else console.warn("VITE_GEMINI_API_KEY missing — running in simulated mode.");
 } catch (e) {
-  console.warn("Failed to init Gemini client — running simulated replies.", e);
+  console.warn("Gemini init error:", e);
+  genAI = null;
 }
 
 // Firebase init (safe parse)
-let firebaseApp = null;
 let firestore = null;
 try {
   const raw = import.meta.env.VITE_FIREBASE_CONFIG || "";
   const cfg = raw ? JSON.parse(raw) : null;
   if (cfg && cfg.apiKey) {
-    firebaseApp = initializeApp(cfg);
-    firestore = getFirestore(firebaseApp);
+    const app = initializeApp(cfg);
+    firestore = getFirestore(app);
   } else {
-    console.warn("VITE_FIREBASE_CONFIG missing or invalid — Firebase disabled.");
+    console.warn("VITE_FIREBASE_CONFIG missing/invalid — Firestore disabled.");
   }
 } catch (e) {
-  console.warn("Firebase init failed:", e);
+  console.warn("Firebase init error:", e);
   firestore = null;
 }
 
-// helper to get model
-const getModel = (modelName = "models/gemini-2.5-flash") => {
+// helper to get model safely
+const getModel = (name = "models/gemini-2.5-flash") => {
   if (!genAI) return null;
   try {
-    return genAI.getGenerativeModel({ model: modelName });
+    return genAI.getGenerativeModel({ model: name });
   } catch (e) {
-    console.warn("getGenerativeModel failed:", e);
+    console.warn("getGenerativeModel error:", e);
     return null;
   }
 };
 
-/* ------------------ Utilities ------------------ */
+/* --------------------------- Utilities --------------------------- */
 
-// simple language detector
+// Language -> locale mapping (Option 3)
+const LANG_TO_LOCALE = {
+  english: "en-NG",
+  pidgin: "pcm-NG",
+  yoruba: "yo-NG",
+  igbo: "ig-NG",
+  hausa: "ha-NG"
+};
+
+// Basic keyword-based language detector
 const detectLanguage = (text = "") => {
   const s = (text || "").toLowerCase();
-  if (/\b(abeg|wey|una|omo|i go|make I|make we)\b/.test(s)) return "pidgin";
-  if (/[ṣọạẹọẹ́àèìòù]/.test(s) || /\b(mi |mi o|kin ni|se|owo|bawo)\b/.test(s)) return "yoruba";
+  if (/\b(abeg|wey|una|omo|make i|make we|i go|i go do)\b/.test(s)) return "pidgin";
+  if (/[ṣọẹọ́àèìòùẹ]/.test(s) || /\b(mi |mi o|kin ni|se|owo|bawo|emi)\b/.test(s)) return "yoruba";
   if (/\b(biko|nna|nne|ego|kedu|onye)\b/.test(s) || /ị|ọ/.test(s)) return "igbo";
-  if (/\b(kai|ina|yaya|sannu|don Allah|wallahi)\b/.test(s)) return "hausa";
+  if (/\b(kai|ina|yaya|sannu|don allah|wallahi)\b/.test(s)) return "hausa";
   return "english";
 };
 
-// pick a TTS voice
-const pickVoiceForLanguage = (lang) => {
+// pick best available voice for locale; fallback gracefully
+const pickVoiceForLocale = (locale) => {
   const voices = window.speechSynthesis.getVoices() || [];
   if (!voices.length) return null;
-  const find = (p) => voices.find(v => v.lang && v.lang.toLowerCase().includes(p));
-  if (["pidgin", "yoruba", "igbo", "hausa"].includes(lang)) {
-    return find("en-ng") || find("en-gb") || voices[0];
-  }
-  return find("en-us") || find("en-gb") || voices[0];
+
+  // try exact match (en-NG, yo-NG, etc.), then fallback to en-GB or en-US
+  const exact = voices.find(v => v.lang && v.lang.toLowerCase().includes(locale.toLowerCase()));
+  if (exact) return exact;
+
+  // pref for Nigerian/UK voices
+  const pref = voices.find(v => v.lang && (v.lang.toLowerCase().includes("en-ng") || v.lang.toLowerCase().includes("en-gb")));
+  if (pref) return pref;
+
+  // fallback to US or first voice
+  return voices.find(v => v.lang && v.lang.toLowerCase().includes("en-us")) || voices[0];
 };
 
+// ensure voices loaded (some browsers need onvoiceschanged)
 const ensureVoicesLoaded = () => {
-  return new Promise((resolve) => {
-    const vs = window.speechSynthesis.getVoices();
-    if (vs && vs.length) return resolve(true);
-    window.speechSynthesis.onvoiceschanged = () => resolve(true);
-    setTimeout(() => resolve(!!window.speechSynthesis.getVoices().length), 1200);
+  return new Promise(res => {
+    const v = window.speechSynthesis.getVoices();
+    if (v && v.length) return res(true);
+    window.speechSynthesis.onvoiceschanged = () => res(true);
+    setTimeout(() => res(!!window.speechSynthesis.getVoices().length), 1200);
   });
 };
 
-const speakText = async (text, lang = "english") => {
+// cleans text for TTS (remove emojis & weird characters)
+const cleanForSpeech = (text) => {
+  if (!text) return "";
+  // remove emoji & control characters; keep punctuation, letters, numbers
+  return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
+             .replace(/[^\p{L}\p{N}\p{P}\p{Zs}]/gu, "") // letters, numbers, punctuation, spaces
+             .trim();
+};
+
+// TTS speak wrapper
+const speakText = async (text, languageKey = "english") => {
   if (!("speechSynthesis" in window)) return;
+  const clean = cleanForSpeech(text);
+  if (!clean) return;
   await ensureVoicesLoaded();
   try {
     window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(text);
-    const voice = pickVoiceForLanguage(lang);
+    const utter = new SpeechSynthesisUtterance(clean);
+    const locale = LANG_TO_LOCALE[languageKey] || "en-NG";
+    const voice = pickVoiceForLocale(locale);
     if (voice) utter.voice = voice;
-    // small tuning per language for better cadence
-    if (lang === "yoruba") { utter.rate = 0.95; utter.pitch = 1.05; }
-    else if (lang === "hausa") { utter.rate = 0.95; utter.pitch = 0.95; }
-    else if (lang === "igbo") { utter.rate = 1.0; utter.pitch = 1.05; }
-    else if (lang === "pidgin") { utter.rate = 0.98; utter.pitch = 1.0; }
-    else { utter.rate = 1.0; utter.pitch = 1.0; }
+    // small cadence tuning per locale for more natural feel
+    switch (languageKey) {
+      case "yoruba": utter.rate = 0.95; utter.pitch = 1.05; break;
+      case "hausa":  utter.rate = 0.95; utter.pitch = 0.95; break;
+      case "igbo":   utter.rate = 1.0;  utter.pitch = 1.05; break;
+      case "pidgin": utter.rate = 0.98; utter.pitch = 1.0;  break;
+      default:       utter.rate = 1.0;  utter.pitch = 1.0;
+    }
     window.speechSynthesis.speak(utter);
   } catch (e) {
-    console.warn("TTS error:", e);
+    console.warn("TTS failed:", e);
   }
 };
 
-/* ------------------ Firestore helpers ------------------ */
+/* --------------------------- Firestore helpers --------------------------- */
 
 const USERS_COLLECTION = "owo_users";
 
-// fetch user doc by username (simple path: users/{username})
-const getUserDocRef = (username) => {
+// doc ref helper
+const userDocRef = (username) => {
   if (!firestore) return null;
   return doc(firestore, USERS_COLLECTION, username);
 };
 
-const ensureUserInFirestore = async (username) => {
-  if (!firestore) return null;
-  const userRef = getUserDocRef(username);
+// ensure user exists (create if not)
+const createUserIfMissing = async (username) => {
+  if (!firestore) return { balance: 10000, transactions: [] };
+  const ref = userDocRef(username);
   try {
-    const snapshot = await getDoc(userRef);
-    if (!snapshot.exists()) {
-      // create initial user doc
-      await setDoc(userRef, {
-        balance: 10000,
-        transactions: [],
-        createdAt: serverTimestamp()
-      });
-      return { balance: 10000, transactions: [] };
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      const initial = { balance: 10000, transactions: [], createdAt: serverTimestamp() };
+      await setDoc(ref, initial);
+      return initial;
     }
-    return snapshot.data();
+    return snap.data();
   } catch (e) {
-    console.warn("Firestore ensure user error:", e);
+    console.warn("Firestore createUserIfMissing error:", e);
     return null;
   }
 };
 
-const appendTransactionToFirestore = async (username, tx) => {
+// append transaction and update balance
+const saveTransaction = async (username, tx, newBalance) => {
   if (!firestore) return false;
-  const userRef = getUserDocRef(username);
+  const ref = userDocRef(username);
   try {
-    await updateDoc(userRef, {
-      transactions: arrayUnion(tx),
-      balance: typeof tx.newBalance === "number" ? tx.newBalance : undefined
-    });
+    // prefer update with arrayUnion & balance update
+    const updatePayload = { transactions: arrayUnion(tx) };
+    if (typeof newBalance === "number") updatePayload.balance = newBalance;
+    await updateDoc(ref, updatePayload);
     return true;
   } catch (e) {
-    // Fallback: read-modify-write if arrayUnion/newBalance failed
+    // fallback read-modify-write
     try {
-      const snapshot = await getDoc(userRef);
-      if (!snapshot.exists()) return false;
-      const data = snapshot.data();
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return false;
+      const data = snap.data();
       const newTxs = [...(data.transactions || []), tx];
-      await setDoc(userRef, { ...data, transactions: newTxs, balance: tx.newBalance }, { merge: true });
+      await setDoc(ref, { ...data, transactions: newTxs, balance: newBalance }, { merge: true });
       return true;
     } catch (err) {
-      console.warn("Firestore append fallback failed:", err);
+      console.warn("Firestore saveTransaction fallback error:", err);
       return false;
     }
   }
 };
 
-const getLatestUserData = async (username) => {
+// get latest user data
+const fetchUserData = async (username) => {
   if (!firestore) return null;
-  const userRef = getUserDocRef(username);
   try {
-    const snapshot = await getDoc(userRef);
-    return snapshot.exists() ? snapshot.data() : null;
+    const snap = await getDoc(userDocRef(username));
+    return snap.exists() ? snap.data() : null;
   } catch (e) {
-    console.warn("Firestore get user error:", e);
+    console.warn("Firestore fetchUserData error:", e);
     return null;
   }
 };
 
-/* ------------------ Intent parsing (heuristic) ------------------ */
-const parseIntentFromText = (text) => {
+/* --------------------------- Intent heuristics --------------------------- */
+const parseIntent = (text) => {
   const s = (text || "").toLowerCase();
-  const numMatch = s.match(/\b(\d{2,}|[0-9]+)\b/);
-  const amount = numMatch ? parseInt(numMatch[0], 10) : null;
+  const num = s.match(/\b(\d{2,}|[0-9]+)\b/);
+  const amount = num ? parseInt(num[0].replace(/[^\d]/g, ""), 10) : null;
 
   if (/\b(send|transfer|pay|give|transfer to|send to|transfer ₦|send ₦)\b/.test(s)) {
     const toMatch = s.match(/\b(?:to|give|for)\s+([A-Za-z0-9_]+)/);
-    const recipient = toMatch ? toMatch[1] : null;
-    return { intent: "transfer", amount, recipient };
+    return { intent: "transfer", amount, recipient: toMatch ? toMatch[1] : null };
   }
   if (/\b(airtime|recharge|top ?up)\b/.test(s)) {
     return { intent: "buy_airtime", amount, recipient: null };
@@ -198,121 +222,116 @@ const parseIntentFromText = (text) => {
   return { intent: null };
 };
 
-/* ------------------ React App ------------------ */
+/* --------------------------- App Component --------------------------- */
 export default function App() {
-  // user and auth
+  // auth & user
   const [username, setUsername] = useState("");
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [loggedInAs, setLoggedInAs] = useState(null); // username normalized
+  const [userState, setUserState] = useState({ balance: 0, transactions: [] });
 
   // chat
-  const [messages, setMessages] = useState([]); // { role, text, lang }
+  const [messages, setMessages] = useState([]); // {role, text, lang}
   const [input, setInput] = useState("");
-  const [thinking, setThinking] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   // speech recognition
   const recognitionRef = useRef(null);
   const [listening, setListening] = useState(false);
 
-  // current user data cache
-  const [userData, setUserData] = useState({ balance: 0, transactions: [] });
-
-  // autoscroll ref
+  // scroll
   const bottomRef = useRef(null);
+  useEffect(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), [messages, loading]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, thinking]);
+  // ensure TTS voices loaded
+  useEffect(() => { ensureVoicesLoaded(); }, []);
 
-  useEffect(() => {
-    // Ensure voices loaded
-    ensureVoicesLoaded();
-  }, []);
-
-  // login handler: create or fetch user from Firestore
+  // Login: create or fetch Firestore user
   const handleLogin = async () => {
-    const name = username.trim().toLowerCase();
-    if (!name) return alert("Please enter a username");
-    setThinking(true);
-    const data = await ensureUserInFirestore(name);
+    const name = (username || "").trim().toLowerCase();
+    if (!name) return alert("Enter a username");
+    setLoading(true);
+    const data = await createUserIfMissing(name);
     if (data) {
-      setUserData({ balance: data.balance || 0, transactions: data.transactions || [] });
-      setMessages([{ role: "assistant", text: `👋 Welcome ${name}! How can I help you today?`, lang: "english" }]);
-      speakText(`Welcome ${name}. How can I help you today?`, "english");
-      setIsLoggedIn(true);
+      setLoggedInAs(name);
+      setUserState({ balance: data.balance || 0, transactions: data.transactions || [] });
+      const welcome = `Welcome ${name}. How can I help you today?`;
+      setMessages([{ role: "assistant", text: welcome, lang: "english" }]);
+      speakText(welcome, "english");
     } else {
-      alert("Could not reach database. You can still use simulated mode.");
-      setMessages([{ role: "assistant", text: `👋 Welcome ${name}! Running locally (simulated).`, lang: "english" }]);
-      setIsLoggedIn(true);
+      // Firestore unavailable -> simulated mode with local initial state
+      setLoggedInAs(name);
+      setUserState({ balance: 10000, transactions: [] });
+      const warn = `Welcome ${name}. Running in simulated mode.`;
+      setMessages([{ role: "assistant", text: warn, lang: "english" }]);
+      speakText(warn, "english");
     }
-    setThinking(false);
+    setLoading(false);
   };
 
-  /* ------------------ Voice input (SpeechRecognition) ------------------ */
+  /* --------------------------- SpeechRecognition (voice input) --------------------------- */
   const startListening = useCallback(() => {
     if (!("SpeechRecognition" in window) && !("webkitSpeechRecognition" in window)) {
-      setMessages(prev => [...prev, { role: "assistant", text: "Voice input is not supported in this browser.", lang: "english" }]);
+      setMessages(prev => [...prev, { role: "assistant", text: "Voice input not supported in this browser.", lang: "english" }]);
       return;
     }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const recognition = new SpeechRecognition();
-    recognition.lang = "en-NG";
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
+    const rec = new SpeechRecognition();
+    rec.lang = "en-NG";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
 
-    recognition.onstart = () => setListening(true);
-    recognition.onresult = (ev) => {
-      const transcript = ev.results[0][0].transcript;
+    rec.onstart = () => setListening(true);
+    rec.onresult = (evt) => {
+      const text = evt.results[0][0].transcript;
       setListening(false);
-      recognition.stop();
-      setInput(transcript);
-      // automatically send
-      handleSend(transcript);
+      rec.stop();
+      setInput(text);
+      handleSend(text);
     };
-    recognition.onerror = (e) => {
-      console.warn("Speech recognition error:", e);
+    rec.onerror = (e) => {
+      console.warn("SpeechRecognition error", e);
       setListening(false);
       setMessages(prev => [...prev, { role: "assistant", text: "Voice input failed. Try typing.", lang: "english" }]);
     };
-    recognition.onend = () => setListening(false);
-    recognitionRef.current = recognition;
-    recognition.start();
-  }, [messages, username, userData]);
+    rec.onend = () => setListening(false);
+    recognitionRef.current = rec;
+    rec.start();
+  }, [messages, loggedInAs, userState]);
 
   const stopListening = () => {
-    try {
-      recognitionRef.current?.stop();
-    } catch (e) {}
+    try { recognitionRef.current?.stop(); } catch (e) {}
     setListening(false);
   };
 
-  /* ------------------ Core send: ask Gemini, run action, store ------------------ */
+  /* --------------------------- Core send handler --------------------------- */
   const handleSend = async (explicitText) => {
     const text = (explicitText !== undefined ? explicitText : input || "").trim();
     if (!text) return;
-    if (!isLoggedIn) {
-      setMessages(prev => [...prev, { role: "assistant", text: "Please login with your username first.", lang: "english" }]);
+    if (!loggedInAs) {
+      setMessages(prev => [...prev, { role: "assistant", text: "Please login with a username first.", lang: "english" }]);
       return;
     }
 
-    const lang = detectLanguage(text);
-    setMessages(prev => [...prev, { role: "user", text, lang }]);
+    const langKey = detectLanguage(text);
+    setMessages(prev => [...prev, { role: "user", text, lang: langKey }]);
     setInput("");
-    setThinking(true);
+    setLoading(true);
 
-    // compose system prompt to force same-language replies and no JSON showing
+    // System prompt — force same-language replies and avoid showing JSON
     const systemPrompt = `
-You are Owo, a helpful multilingual financial assistant for Nigerian users.
+You are Owo, a kind multilingual financial assistant for Nigerian users.
 Always reply in the SAME language as the user's message (English, Pidgin, Yoruba, Hausa, Igbo).
-Do NOT output raw JSON or code blocks. Reply naturally and ask short clarifying questions when necessary.
+Never output raw JSON or code blocks to the user. Reply naturally and warmly.
 You can check balance, make transfers, buy airtime, and show transaction history.
+If you need clarification, ask one short question in the user's language.
 `;
 
-    // get short history
+    // short history
     const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
     const model = getModel("models/gemini-2.5-flash");
 
-    let botReply = null;
-
+    // Ask Gemini (if available)
+    let modelReply = null;
     if (model) {
       try {
         const response = await model.generateContent({
@@ -323,133 +342,122 @@ You can check balance, make transfers, buy airtime, and show transaction history
           ],
           model: "models/gemini-2.5-flash"
         });
-        botReply = response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-                   (response?.response?.text ? response.response.text() : null);
-      } catch (gErr) {
-        console.warn("Gemini request failed:", gErr);
+        // read candidate robustly
+        modelReply = response?.candidates?.[0]?.content?.parts?.[0]?.text || (response?.response?.text ? response.response.text() : null);
+      } catch (err) {
+        console.warn("Gemini call error:", err);
       }
     }
 
-    // fallback friendly reply if no model reply
-    if (!botReply) {
-      botReply = lang === "pidgin" ? "Okay, make I handle that..." : "Alright — I'm on it...";
+    // Fallback friendly reply if model unavailable
+    if (!modelReply) {
+      modelReply = langKey === "pidgin" ? "Okay, make I handle that..." : "Alright — I'm working on that for you.";
     }
 
-    // parse intent from user's text (heuristic)
-    const parsed = parseIntentFromText(text);
-    let finalReply = botReply;
+    // Parse intent heuristically & execute action using Firestore
+    const parsed = parseIntent(text);
+    let finalReply = modelReply;
 
-    // perform action & persist to Firestore
-    const userKey = username.trim().toLowerCase();
     if (parsed.intent) {
-      // fetch latest user state
-      const latest = await getLatestUserData(userKey);
-      const currentBalance = latest?.balance ?? userData.balance ?? 0;
+      // fetch latest data before committing
+      const latest = await fetchUserData(loggedInAs) || userState;
+      let currentBal = latest.balance ?? userState.balance ?? 0;
+
       if (parsed.intent === "check_balance") {
-        finalReply = `💰 Your balance is ₦${currentBalance}.`;
+        finalReply = `Your balance is ₦${currentBal}.`;
       } else if (parsed.intent === "transfer") {
         const amt = parsed.amount || 0;
         const recipient = parsed.recipient || "recipient";
-        if (amt <= 0) {
-          finalReply = lang === "pidgin" ? "Which amount you wan send?" : "Please tell me the amount to transfer.";
-        } else if (currentBalance < amt) {
+        if (!amt || amt <= 0) {
+          finalReply = langKey === "pidgin" ? "Which amount you wan send?" : "Please specify a valid amount to transfer.";
+        } else if (currentBal < amt) {
           finalReply = "Transaction failed: insufficient funds.";
         } else {
-          const newBal = currentBalance - amt;
-          const tx = { type: "Transfer", amount: amt, to: recipient, date: new Date().toISOString(), newBalance: newBal };
-          const ok = await appendTransactionToFirestore(userKey, tx);
+          const newBal = currentBal - amt;
+          const tx = { type: "Transfer", amount: amt, to: recipient, date: new Date().toISOString() };
+          const ok = await saveTransaction(loggedInAs, tx, newBal);
           if (ok) {
-            finalReply = `✅ Transfer of ₦${amt} to ${recipient} completed. New balance: ₦${newBal}.`;
-            setUserData(prev => ({ ...prev, balance: newBal, transactions: [...(prev.transactions||[]), tx] }));
+            finalReply = `Transfer of ₦${amt} to ${recipient} completed. New balance: ₦${newBal}.`;
+            setUserState(prev => ({ ...prev, balance: newBal, transactions: [...(prev.transactions || []), tx] }));
           } else {
-            finalReply = "Transfer completed locally, but failed to save to database.";
+            // local fallback
+            setUserState(prev => ({ ...prev, balance: currentBal - amt, transactions: [...(prev.transactions || []), { type: "Transfer", amount: amt, to: recipient, date: new Date().toISOString() }] }));
+            finalReply = `Transfer of ₦${amt} to ${recipient} completed (saved locally). New balance: ₦${currentBal - amt}.`;
           }
         }
       } else if (parsed.intent === "buy_airtime") {
         const amt = parsed.amount || 0;
-        if (amt <= 0) {
-          finalReply = lang === "pidgin" ? "Which amount of airtime you want?" : "Please specify the airtime amount.";
-        } else if (currentBalance < amt) {
+        if (!amt || amt <= 0) {
+          finalReply = langKey === "pidgin" ? "Which amount of airtime you want?" : "Please specify the airtime amount.";
+        } else if (currentBal < amt) {
           finalReply = "Transaction failed: insufficient funds.";
         } else {
-          const newBal = currentBalance - amt;
-          const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toISOString(), newBalance: newBal };
-          const ok = await appendTransactionToFirestore(userKey, tx);
+          const newBal = currentBal - amt;
+          const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toISOString() };
+          const ok = await saveTransaction(loggedInAs, tx, newBal);
           if (ok) {
-            finalReply = `📱 Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`;
-            setUserData(prev => ({ ...prev, balance: newBal, transactions: [...(prev.transactions||[]), tx] }));
+            finalReply = `Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`;
+            setUserState(prev => ({ ...prev, balance: newBal, transactions: [...(prev.transactions || []), tx] }));
           } else {
-            finalReply = "Airtime processed locally, saving to database failed.";
+            setUserState(prev => ({ ...prev, balance: currentBal - amt, transactions: [...(prev.transactions || []), { type: "Airtime", amount: amt, to: "Self", date: new Date().toISOString() }] }));
+            finalReply = `Airtime processed locally. New balance: ₦${currentBal - amt}.`;
           }
         }
       } else if (parsed.intent === "show_transaction_history") {
-        const latestData = latest || userData;
+        const latestData = latest || userState;
         const txs = latestData.transactions || [];
         if (!txs.length) finalReply = "You have no transactions yet.";
         else {
-          const list = txs.slice(-8).reverse().map(t => `${new Date(t.date).toLocaleString()} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
-          finalReply = `📜 Recent transactions:\n${list}`;
+          const lines = txs.slice(-8).reverse().map(t => `${new Date(t.date).toLocaleString()} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
+          finalReply = `Recent transactions:\n${lines}`;
         }
       }
     }
 
-    // add assistant message
-    setMessages(prev => [...prev, { role: "assistant", text: finalReply, lang }]);
+    // push assistant reply (no JSON)
+    setMessages(prev => [...prev, { role: "assistant", text: finalReply, lang: langKey }]);
 
-    // speak reply
-    await speakText(finalReply, lang);
+    // speak reply in detected locale (cleaned)
+    await speakText(finalReply, langKey);
 
-    setThinking(false);
+    setLoading(false);
   };
 
-  /* ------------------ Render UI ------------------ */
-  if (!isLoggedIn) {
+  /* --------------------------- UI --------------------------- */
+
+  if (!loggedInAs) {
     return (
       <div style={styles.outer}>
         <div style={styles.card}>
-          <h2 style={{ margin: 0 }}>💸 Owo — Financial Assistant</h2>
-          <p style={{ color: "#cfcfcf" }}>Enter a username to continue (data stored in Firebase).</p>
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="username (e.g. michael)"
-            style={styles.input}
-          />
+          <h2 style={{ margin: 0 }}>Owo — Financial Assistant</h2>
+          <p style={{ color: "#cfcfcf" }}>Sign in with a username. Data stored in Firestore (if configured).</p>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username (e.g. michael)" style={styles.input} />
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={handleLogin} style={styles.primary}>Continue</button>
+            <button onClick={handleLogin} style={styles.primary} disabled={loading}>{loading ? "Starting..." : "Continue"}</button>
             <button onClick={() => { setUsername("guest"); handleLogin(); }} style={styles.secondary}>Use guest</button>
           </div>
           <p style={{ fontSize: 12, color: "#9ca3af", marginTop: 10 }}>
-            Make sure your Firebase config is set in VITE_FIREBASE_CONFIG for persistent storage.
+            Tip: Ensure VITE_FIREBASE_CONFIG is set and Firestore rules allow reads/writes for this app.
           </p>
         </div>
       </div>
     );
   }
 
-  // logged in view
   return (
     <div style={styles.outer}>
       <div style={styles.cardLarge}>
         <div style={styles.header}>
           <div>
-            <h3 style={{ margin: 0 }}>💬 Owo</h3>
-            <div style={{ fontSize: 12, color: "#cfcfcf" }}>Logged in as <b>{username}</b> • ₦{userData.balance || "0"}</div>
+            <h3 style={{ margin: 0 }}>Owo</h3>
+            <div style={{ fontSize: 12, color: "#cfcfcf" }}>Logged in as <b>{loggedInAs}</b> • ₦{userState.balance || 0}</div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button style={styles.tag} onClick={() => {
-              // refresh user data
-              (async () => {
-                const latest = await getLatestUserData(username.trim().toLowerCase());
-                if (latest) setUserData({ balance: latest.balance || 0, transactions: latest.transactions || [] });
-              })();
+            <button style={styles.tag} onClick={async () => {
+              const fresh = await fetchUserData(loggedInAs);
+              if (fresh) setUserState({ balance: fresh.balance || 0, transactions: fresh.transactions || [] });
             }}>Refresh</button>
-            <button style={styles.tag} onClick={() => {
-              // logout
-              setIsLoggedIn(false);
-              setUsername("");
-              setMessages([]);
-            }}>Logout</button>
+            <button style={styles.tag} onClick={() => { setMessages([]); }}>Clear chat</button>
           </div>
         </div>
 
@@ -469,17 +477,9 @@ You can check balance, make transfers, buy airtime, and show transaction history
             {listening ? "● Listening" : "🎤 Speak"}
           </button>
 
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type or press Speak..."
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
-            style={{ flex: 1, padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", background: "#071024", color: "#fff" }}
-          />
+          <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSend()} placeholder="Type or press Speak..." style={{ flex: 1, padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", background: "#071024", color: "#fff" }} />
 
-          <button onClick={() => handleSend()} style={styles.primary}>
-            Send
-          </button>
+          <button onClick={() => handleSend()} style={styles.primary}>Send</button>
         </div>
 
         <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
@@ -493,7 +493,7 @@ You can check balance, make transfers, buy airtime, and show transaction history
   );
 }
 
-/* ------------------ Styles ------------------ */
+/* --------------------------- Styles --------------------------- */
 const styles = {
   outer: {
     minHeight: "100vh",
@@ -574,4 +574,5 @@ const styles = {
     fontSize: 13,
   }
 };
+
 
