@@ -1,26 +1,50 @@
+// src/App.jsx
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { initializeApp } from "firebase/app";
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+  arrayUnion,
+  serverTimestamp
+} from "firebase/firestore";
 
-/**
- * IMPORTANT:
- * - Ensure you installed: npm install @google/generative-ai
- * - Set env var: VITE_GEMINI_API_KEY=your_key_here
- */
+/* ------------------ Config & Initialization ------------------ */
 
-// ------------------------- Gemini init -------------------------
+// Gemini init (safe)
 let genAI = null;
 try {
   const key = import.meta.env.VITE_GEMINI_API_KEY;
   if (key) {
     genAI = new GoogleGenerativeAI(key);
   } else {
-    console.warn("VITE_GEMINI_API_KEY missing — running in simulated mode.");
+    console.warn("VITE_GEMINI_API_KEY missing — running with simulated replies.");
   }
 } catch (e) {
-  console.warn("Gemini init failed — running simulated mode.", e);
+  console.warn("Failed to init Gemini client — running simulated replies.", e);
 }
 
-// Helper to get model instance (safe)
+// Firebase init (safe parse)
+let firebaseApp = null;
+let firestore = null;
+try {
+  const raw = import.meta.env.VITE_FIREBASE_CONFIG || "";
+  const cfg = raw ? JSON.parse(raw) : null;
+  if (cfg && cfg.apiKey) {
+    firebaseApp = initializeApp(cfg);
+    firestore = getFirestore(firebaseApp);
+  } else {
+    console.warn("VITE_FIREBASE_CONFIG missing or invalid — Firebase disabled.");
+  }
+} catch (e) {
+  console.warn("Firebase init failed:", e);
+  firestore = null;
+}
+
+// helper to get model
 const getModel = (modelName = "models/gemini-2.5-flash") => {
   if (!genAI) return null;
   try {
@@ -31,527 +55,475 @@ const getModel = (modelName = "models/gemini-2.5-flash") => {
   }
 };
 
-// ------------------------- Util: Language & Text Helpers -------------------------
+/* ------------------ Utilities ------------------ */
+
+// simple language detector
 const detectLanguage = (text = "") => {
-  if (!text) return "english";
-  const s = text.toLowerCase();
-
-  // pidgin keywords
-  if (/\b(abeg|wey|una|omi|omo|i go|i go do|na)\b/.test(s)) return "pidgin";
-
-  // yoruba detection (common characters / words)
-  if (/[ṣọạẹẹọẹọ́àèìòùẹ]/.test(s) || /\b(mi |mi o|kin ni|se|owo|abẹ|gba)\b/.test(s)) return "yoruba";
-
-  // igbo detection
-  if (/\b(biko|nna|nne|ego|kedu|ime|onye)\b/.test(s) || /ị|ịbụ|ọzọ/.test(s)) return "igbo";
-
-  // hausa detection
+  const s = (text || "").toLowerCase();
+  if (/\b(abeg|wey|una|omo|i go|make I|make we)\b/.test(s)) return "pidgin";
+  if (/[ṣọạẹọẹ́àèìòù]/.test(s) || /\b(mi |mi o|kin ni|se|owo|bawo)\b/.test(s)) return "yoruba";
+  if (/\b(biko|nna|nne|ego|kedu|onye)\b/.test(s) || /ị|ọ/.test(s)) return "igbo";
   if (/\b(kai|ina|yaya|sannu|don Allah|wallahi)\b/.test(s)) return "hausa";
-
-  // default english
   return "english";
 };
 
-// FIX 1: Utility to strip emojis from text for TTS
-const stripEmojis = (text) => {
-  // Regex matches various unicode ranges commonly used for emojis and symbols
-  return text.replace(/(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g, '');
-};
-
-// ------------------------- TTS voice picker & helpers -------------------------
+// pick a TTS voice
 const pickVoiceForLanguage = (lang) => {
   const voices = window.speechSynthesis.getVoices() || [];
   if (!voices.length) return null;
-
-  const findPrefer = (pattern) =>
-    voices.find((v) => v.lang && v.lang.toLowerCase().includes(pattern));
-
-  // prefer Nigerian-en when available (en-ng)
-  if (lang === "pidgin" || lang === "yoruba" || lang === "igbo" || lang === "hausa") {
-    return findPrefer("en-ng") || findPrefer("en-gb") || voices[0];
+  const find = (p) => voices.find(v => v.lang && v.lang.toLowerCase().includes(p));
+  if (["pidgin", "yoruba", "igbo", "hausa"].includes(lang)) {
+    return find("en-ng") || find("en-gb") || voices[0];
   }
-
-  // english default: en-us > en-gb
-  return findPrefer("en-us") || findPrefer("en-gb") || voices[0];
+  return find("en-us") || find("en-gb") || voices[0];
 };
 
-const speakText = (text, lang = "english", opts = {}) => {
-  if (!("speechSynthesis" in window)) return;
-  try {
-    window.speechSynthesis.cancel();
-    
-    // FIX 1: Clean the text before speaking
-    const cleanText = stripEmojis(text); 
-    const utter = new SpeechSynthesisUtterance(cleanText);
-
-    // set voice & lang code if possible
-    const voice = pickVoiceForLanguage(lang);
-    if (voice) utter.voice = voice;
-
-    // tune rate/pitch roughly per language to mimic cadence
-    switch (lang) {
-      case "yoruba":
-        utter.rate = opts.rate ?? 0.92;
-        utter.pitch = opts.pitch ?? 1.05;
-        break;
-      case "hausa":
-        utter.rate = opts.rate ?? 0.95;
-        utter.pitch = opts.pitch ?? 0.95;
-        break;
-      case "igbo":
-        utter.rate = opts.rate ?? 1.0;
-        utter.pitch = opts.pitch ?? 1.05;
-        break;
-      case "pidgin":
-        utter.rate = opts.rate ?? 0.98;
-        utter.pitch = opts.pitch ?? 1.0;
-        break;
-      default:
-        utter.rate = opts.rate ?? 1.0;
-        utter.pitch = opts.pitch ?? 1.0;
-    }
-
-    window.speechSynthesis.speak(utter);
-  } catch (e) {
-    console.warn("TTS failed:", e);
-  }
-};
-
-// ensure voices loaded in some browsers
 const ensureVoicesLoaded = () => {
-  return new Promise((res) => {
-    const voices = window.speechSynthesis.getVoices();
-    if (voices && voices.length) return res(true);
-    window.speechSynthesis.onvoiceschanged = () => res(true);
-    // fallback timeout
-    setTimeout(() => res(!!window.speechSynthesis.getVoices().length), 1500);
+  return new Promise((resolve) => {
+    const vs = window.speechSynthesis.getVoices();
+    if (vs && vs.length) return resolve(true);
+    window.speechSynthesis.onvoiceschanged = () => resolve(true);
+    setTimeout(() => resolve(!!window.speechSynthesis.getVoices().length), 1200);
   });
 };
 
-// ------------------------- localStorage user data helpers -------------------------
-const USERS_KEY = "owo_users_v1";
-
-const loadAllUsers = () => {
+const speakText = async (text, lang = "english") => {
+  if (!("speechSynthesis" in window)) return;
+  await ensureVoicesLoaded();
   try {
-    const raw = localStorage.getItem(USERS_KEY);
-    return raw ? JSON.parse(raw) : {};
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(text);
+    const voice = pickVoiceForLanguage(lang);
+    if (voice) utter.voice = voice;
+    // small tuning per language for better cadence
+    if (lang === "yoruba") { utter.rate = 0.95; utter.pitch = 1.05; }
+    else if (lang === "hausa") { utter.rate = 0.95; utter.pitch = 0.95; }
+    else if (lang === "igbo") { utter.rate = 1.0; utter.pitch = 1.05; }
+    else if (lang === "pidgin") { utter.rate = 0.98; utter.pitch = 1.0; }
+    else { utter.rate = 1.0; utter.pitch = 1.0; }
+    window.speechSynthesis.speak(utter);
   } catch (e) {
-    console.error("Failed to parse users data:", e);
-    return {};
+    console.warn("TTS error:", e);
   }
 };
 
-const saveAllUsers = (obj) => {
-  localStorage.setItem(USERS_KEY, JSON.stringify(obj));
+/* ------------------ Firestore helpers ------------------ */
+
+const USERS_COLLECTION = "owo_users";
+
+// fetch user doc by username (simple path: users/{username})
+const getUserDocRef = (username) => {
+  if (!firestore) return null;
+  return doc(firestore, USERS_COLLECTION, username);
 };
 
-// ------------------------- Intent extraction (simple heuristics) -------------------------
+const ensureUserInFirestore = async (username) => {
+  if (!firestore) return null;
+  const userRef = getUserDocRef(username);
+  try {
+    const snapshot = await getDoc(userRef);
+    if (!snapshot.exists()) {
+      // create initial user doc
+      await setDoc(userRef, {
+        balance: 10000,
+        transactions: [],
+        createdAt: serverTimestamp()
+      });
+      return { balance: 10000, transactions: [] };
+    }
+    return snapshot.data();
+  } catch (e) {
+    console.warn("Firestore ensure user error:", e);
+    return null;
+  }
+};
+
+const appendTransactionToFirestore = async (username, tx) => {
+  if (!firestore) return false;
+  const userRef = getUserDocRef(username);
+  try {
+    await updateDoc(userRef, {
+      transactions: arrayUnion(tx),
+      balance: typeof tx.newBalance === "number" ? tx.newBalance : undefined
+    });
+    return true;
+  } catch (e) {
+    // Fallback: read-modify-write if arrayUnion/newBalance failed
+    try {
+      const snapshot = await getDoc(userRef);
+      if (!snapshot.exists()) return false;
+      const data = snapshot.data();
+      const newTxs = [...(data.transactions || []), tx];
+      await setDoc(userRef, { ...data, transactions: newTxs, balance: tx.newBalance }, { merge: true });
+      return true;
+    } catch (err) {
+      console.warn("Firestore append fallback failed:", err);
+      return false;
+    }
+  }
+};
+
+const getLatestUserData = async (username) => {
+  if (!firestore) return null;
+  const userRef = getUserDocRef(username);
+  try {
+    const snapshot = await getDoc(userRef);
+    return snapshot.exists() ? snapshot.data() : null;
+  } catch (e) {
+    console.warn("Firestore get user error:", e);
+    return null;
+  }
+};
+
+/* ------------------ Intent parsing (heuristic) ------------------ */
 const parseIntentFromText = (text) => {
-  const s = text.toLowerCase();
-  
-  // FIX 2: Robust number parsing (handling commas and simple number words)
-  let amount = null;
-  
-  // 1. Try to find a number written in digits (handling commas: 1000, 1,000)
-  // Regex: Finds 1-3 digits, optionally followed by groups of ',3 digits' OR finds any single digit group
-  let numMatch = s.match(/(\d{1,3}(,\d{3})*|\d+)/);
-  if (numMatch) {
-      amount = parseInt(numMatch[0].replace(/,/g, ''), 10);
-  }
-  
-  // 2. If no number is found, check for the word 'thousand' to multiply
-  if (!amount) {
-      // Look for number words followed by 'thousand' (e.g., two thousand)
-      const wordMatch = s.match(/\b(one|two|three|four|five|ten|twenty)\s+thousand\b/);
-      if (wordMatch) {
-          const multiplierMap = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'twenty': 20 };
-          const word = wordMatch[1];
-          amount = multiplierMap[word] * 1000;
-      }
-  }
+  const s = (text || "").toLowerCase();
+  const numMatch = s.match(/\b(\d{2,}|[0-9]+)\b/);
+  const amount = numMatch ? parseInt(numMatch[0], 10) : null;
 
-
-  // transfer patterns
-  if (/\b(send|transfer|pay|give|transfer to|send to)\b/.test(s)) {
-    // recipient heuristics: "to NAME" or "give NAME"
+  if (/\b(send|transfer|pay|give|transfer to|send to|transfer ₦|send ₦)\b/.test(s)) {
     const toMatch = s.match(/\b(?:to|give|for)\s+([A-Za-z0-9_]+)/);
-    const recipient = toMatch ? toMatch[1] : "recipient";
+    const recipient = toMatch ? toMatch[1] : null;
     return { intent: "transfer", amount, recipient };
   }
-
-  // airtime
   if (/\b(airtime|recharge|top ?up)\b/.test(s)) {
     return { intent: "buy_airtime", amount, recipient: null };
   }
-
-  // balance
-  if (/\b(balance|how much|how many|remain|wetin be my balance|kin ni balance)\b/.test(s)) {
+  if (/\b(balance|remain|how much|how many|wetin be my balance|kin ni balance)\b/.test(s)) {
     return { intent: "check_balance" };
   }
-
-  // transactions/history
   if (/\b(history|transactions|last transactions|transaction history|show transactions)\b/.test(s)) {
     return { intent: "show_transaction_history" };
   }
-
   return { intent: null };
 };
 
-// ------------------------- Main App component -------------------------
+/* ------------------ React App ------------------ */
 export default function App() {
-  // user/session state
+  // user and auth
   const [username, setUsername] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [users, setUsers] = useState(() => loadAllUsers());
 
-  // chat state
-  const [messages, setMessages] = useState([]); // {role: 'user'|'assistant', text: '', lang }
+  // chat
+  const [messages, setMessages] = useState([]); // { role, text, lang }
   const [input, setInput] = useState("");
-  const [isThinking, setIsThinking] = useState(false);
+  const [thinking, setThinking] = useState(false);
 
-  // speech recognition refs
+  // speech recognition
   const recognitionRef = useRef(null);
-  const [isListening, setIsListening] = useState(false);
+  const [listening, setListening] = useState(false);
 
-  // ensure voices loaded on mount
+  // current user data cache
+  const [userData, setUserData] = useState({ balance: 0, transactions: [] });
+
+  // autoscroll ref
+  const bottomRef = useRef(null);
+
   useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, thinking]);
+
+  useEffect(() => {
+    // Ensure voices loaded
     ensureVoicesLoaded();
-    // greet
-    speakText("Owo ready. Please login to continue.", "english");
   }, []);
 
-  // ------------------------- User management -------------------------
-  const ensureUserExists = (name) => {
-    const clean = name.trim().toLowerCase();
-    const existing = users[clean];
-    if (!existing) {
-      const newUsers = {
-        ...users,
-        [clean]: { balance: 10000, transactions: [] }, // start balance ₦10,000
-      };
-      setUsers(newUsers);
-      saveAllUsers(newUsers);
-      return newUsers[clean];
+  // login handler: create or fetch user from Firestore
+  const handleLogin = async () => {
+    const name = username.trim().toLowerCase();
+    if (!name) return alert("Please enter a username");
+    setThinking(true);
+    const data = await ensureUserInFirestore(name);
+    if (data) {
+      setUserData({ balance: data.balance || 0, transactions: data.transactions || [] });
+      setMessages([{ role: "assistant", text: `👋 Welcome ${name}! How can I help you today?`, lang: "english" }]);
+      speakText(`Welcome ${name}. How can I help you today?`, "english");
+      setIsLoggedIn(true);
+    } else {
+      alert("Could not reach database. You can still use simulated mode.");
+      setMessages([{ role: "assistant", text: `👋 Welcome ${name}! Running locally (simulated).`, lang: "english" }]);
+      setIsLoggedIn(true);
     }
-    return existing;
+    setThinking(false);
   };
 
-  const handleLogin = () => {
-    if (!username.trim()) return alert("Enter a username to continue");
-    const clean = username.trim().toLowerCase();
-    ensureUserExists(clean);
-    setIsLoggedIn(true);
-    setMessages([{ role: "assistant", text: `👋 Welcome ${clean}. How can I help you today?`, lang: "english" }]);
-    speakText(`Welcome ${clean}. How can I help you today?`, "english");
-  };
-
-  // ------------------------- Speech recognition (voice input) -------------------------
+  /* ------------------ Voice input (SpeechRecognition) ------------------ */
   const startListening = useCallback(() => {
-    if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
-      setMessages((prev) => [...prev, { role: "assistant", text: "Voice input not supported in this browser.", lang: "english" }]);
+    if (!("SpeechRecognition" in window) && !("webkitSpeechRecognition" in window)) {
+      setMessages(prev => [...prev, { role: "assistant", text: "Voice input is not supported in this browser.", lang: "english" }]);
       return;
     }
-
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-    recognition.lang = "en-NG"; // Accept Nigerian English
+    recognition.lang = "en-NG";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
-    recognition.onstart = () => {
-      setIsListening(true);
-    };
-    recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript;
-      setIsListening(false);
+    recognition.onstart = () => setListening(true);
+    recognition.onresult = (ev) => {
+      const transcript = ev.results[0][0].transcript;
+      setListening(false);
       recognition.stop();
       setInput(transcript);
-      // auto-send
+      // automatically send
       handleSend(transcript);
     };
     recognition.onerror = (e) => {
-      console.error("Speech recognition error:", e);
-      setIsListening(false);
-      setMessages((prev) => [...prev, { role: "assistant", text: "Voice input failed. Try typing.", lang: "english" }]);
+      console.warn("Speech recognition error:", e);
+      setListening(false);
+      setMessages(prev => [...prev, { role: "assistant", text: "Voice input failed. Try typing.", lang: "english" }]);
     };
-    recognition.onend = () => {
-      setIsListening(false);
-    };
-
+    recognition.onend = () => setListening(false);
     recognitionRef.current = recognition;
     recognition.start();
-  }, [messages, users, username]);
+  }, [messages, username, userData]);
 
   const stopListening = () => {
     try {
       recognitionRef.current?.stop();
     } catch (e) {}
-    setIsListening(false);
+    setListening(false);
   };
 
-  // ------------------------- Simulated transaction actions -------------------------
-  const saveUserUpdates = (userKey, updates) => {
-    const fresh = { ...users, [userKey]: { ...users[userKey], ...updates } };
-    setUsers(fresh);
-    saveAllUsers(fresh);
-  };
-
-  const runSimulatedAction = (userKey, parsedIntent) => {
-    const userData = users[userKey];
-    if (!userData) return "User account missing.";
-
-    const { intent, amount, recipient } = parsedIntent;
-
-    if (intent === "check_balance") {
-      return `💰 Your balance is ₦${userData.balance}.`;
-    }
-
-    if (intent === "transfer") {
-      const amt = amount || 0;
-      if (amt <= 0) return "Please specify a valid amount.";
-      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
-      const newBal = userData.balance - amt;
-      const tx = { type: "Transfer", amount: amt, to: recipient || "recipient", date: new Date().toLocaleString() };
-      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
-      return `✅ Transfer of ₦${amt} to ${recipient || "recipient"} completed. New balance: ₦${newBal}.`;
-    }
-
-    if (intent === "buy_airtime") {
-      const amt = amount || 0;
-      if (amt <= 0) return "Please specify airtime amount.";
-      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
-      const newBal = userData.balance - amt;
-      const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toLocaleString() };
-      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
-      return `📱 Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`;
-    }
-
-    if (intent === "show_transaction_history") {
-      const slice = (userData.transactions || []).slice(-8).reverse();
-      if (!slice.length) return "You have no transactions yet.";
-      return "📜 Recent transactions:\n" + slice.map(t => `${t.date} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
-    }
-
-    return null;
-  };
-
-  // ------------------------- Core: send message & process -------------------------
+  /* ------------------ Core send: ask Gemini, run action, store ------------------ */
   const handleSend = async (explicitText) => {
-    const text = explicitText !== undefined ? explicitText : input;
-    if (!text || !text.trim()) return;
+    const text = (explicitText !== undefined ? explicitText : input || "").trim();
+    if (!text) return;
     if (!isLoggedIn) {
-      setMessages((prev) => [...prev, { role: "assistant", text: "Please login first.", lang: "english" }]);
+      setMessages(prev => [...prev, { role: "assistant", text: "Please login with your username first.", lang: "english" }]);
       return;
     }
 
-    const userKey = username.trim().toLowerCase();
-
-    // append user message
-    const userLang = detectLanguage(text);
-    setMessages((prev) => [...prev, { role: "user", text, lang: userLang }]);
+    const lang = detectLanguage(text);
+    setMessages(prev => [...prev, { role: "user", text, lang }]);
     setInput("");
+    setThinking(true);
 
-    setIsThinking(true);
-
-    try {
-      // FIX 3: Enhanced System Prompt
-      const systemPrompt = `
-You are Owo, a friendly multilingual financial assistant for Nigerian users.
-You understand and respond fluently in English, Nigerian Pidgin, Yoruba, Igbo, and Hausa.
-Always reply **naturally and fluently** in the SAME language as the user's message, including appropriate greetings and local phrases.
-Do NOT output raw JSON or code blocks. Respond naturally like a human assistant.
+    // compose system prompt to force same-language replies and no JSON showing
+    const systemPrompt = `
+You are Owo, a helpful multilingual financial assistant for Nigerian users.
+Always reply in the SAME language as the user's message (English, Pidgin, Yoruba, Hausa, Igbo).
+Do NOT output raw JSON or code blocks. Reply naturally and ask short clarifying questions when necessary.
 You can check balance, make transfers, buy airtime, and show transaction history.
-If you need clarification ask a short question in the user's language.
 `;
 
-      // build conversation context (last ~10 messages to keep prompt small)
-      const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
-      const inputTurn = `User (${userLang}): ${text}`;
+    // get short history
+    const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
+    const model = getModel("models/gemini-2.5-flash");
 
-      let botReplyText = null;
-      const model = getModel("models/gemini-2.5-flash");
-      if (model) {
-        try {
-          const response = await model.generateContent({
-            contents: [
-              { parts: [{ text: systemPrompt }] },
-              { parts: [{ text: shortHistory.join("\n") }] },
-              { parts: [{ text: inputTurn }] }
-            ],
-            model: "models/gemini-2.5-flash"
-          });
+    let botReply = null;
 
-          const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (candidate) botReplyText = candidate;
-          else if (response?.text) botReplyText = response.text;
-          else botReplyText = "Sorry, I couldn't formulate a reply right now.";
-        } catch (gErr) {
-          console.warn("Gemini call failed, falling back to simulated reply:", gErr);
+    if (model) {
+      try {
+        const response = await model.generateContent({
+          contents: [
+            { parts: [{ text: systemPrompt }] },
+            { parts: [{ text: shortHistory.join("\n") }] },
+            { parts: [{ text }] }
+          ],
+          model: "models/gemini-2.5-flash"
+        });
+        botReply = response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+                   (response?.response?.text ? response.response.text() : null);
+      } catch (gErr) {
+        console.warn("Gemini request failed:", gErr);
+      }
+    }
+
+    // fallback friendly reply if no model reply
+    if (!botReply) {
+      botReply = lang === "pidgin" ? "Okay, make I handle that..." : "Alright — I'm on it...";
+    }
+
+    // parse intent from user's text (heuristic)
+    const parsed = parseIntentFromText(text);
+    let finalReply = botReply;
+
+    // perform action & persist to Firestore
+    const userKey = username.trim().toLowerCase();
+    if (parsed.intent) {
+      // fetch latest user state
+      const latest = await getLatestUserData(userKey);
+      const currentBalance = latest?.balance ?? userData.balance ?? 0;
+      if (parsed.intent === "check_balance") {
+        finalReply = `💰 Your balance is ₦${currentBalance}.`;
+      } else if (parsed.intent === "transfer") {
+        const amt = parsed.amount || 0;
+        const recipient = parsed.recipient || "recipient";
+        if (amt <= 0) {
+          finalReply = lang === "pidgin" ? "Which amount you wan send?" : "Please tell me the amount to transfer.";
+        } else if (currentBalance < amt) {
+          finalReply = "Transaction failed: insufficient funds.";
+        } else {
+          const newBal = currentBalance - amt;
+          const tx = { type: "Transfer", amount: amt, to: recipient, date: new Date().toISOString(), newBalance: newBal };
+          const ok = await appendTransactionToFirestore(userKey, tx);
+          if (ok) {
+            finalReply = `✅ Transfer of ₦${amt} to ${recipient} completed. New balance: ₦${newBal}.`;
+            setUserData(prev => ({ ...prev, balance: newBal, transactions: [...(prev.transactions||[]), tx] }));
+          } else {
+            finalReply = "Transfer completed locally, but failed to save to database.";
+          }
+        }
+      } else if (parsed.intent === "buy_airtime") {
+        const amt = parsed.amount || 0;
+        if (amt <= 0) {
+          finalReply = lang === "pidgin" ? "Which amount of airtime you want?" : "Please specify the airtime amount.";
+        } else if (currentBalance < amt) {
+          finalReply = "Transaction failed: insufficient funds.";
+        } else {
+          const newBal = currentBalance - amt;
+          const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toISOString(), newBalance: newBal };
+          const ok = await appendTransactionToFirestore(userKey, tx);
+          if (ok) {
+            finalReply = `📱 Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`;
+            setUserData(prev => ({ ...prev, balance: newBal, transactions: [...(prev.transactions||[]), tx] }));
+          } else {
+            finalReply = "Airtime processed locally, saving to database failed.";
+          }
+        }
+      } else if (parsed.intent === "show_transaction_history") {
+        const latestData = latest || userData;
+        const txs = latestData.transactions || [];
+        if (!txs.length) finalReply = "You have no transactions yet.";
+        else {
+          const list = txs.slice(-8).reverse().map(t => `${new Date(t.date).toLocaleString()} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
+          finalReply = `📜 Recent transactions:\n${list}`;
         }
       }
-
-      if (!botReplyText) {
-        botReplyText = userLang === "pidgin" ? "Okay, make I check am..." : "Alright, let me handle that for you...";
-      }
-
-      const parsed = parseIntentFromText(text);
-      const simulated = runSimulatedAction(userKey, parsed);
-
-      let finalReply = simulated || botReplyText;
-
-      setMessages((prev) => [...prev, { role: "assistant", text: finalReply, lang: userLang }]);
-
-      await ensureVoicesLoaded();
-      speakText(finalReply, userLang);
-
-    } catch (err) {
-      console.error("Chat error:", err);
-      setMessages((prev) => [...prev, { role: "assistant", text: "Sorry, something went wrong.", lang: "english" }]);
-    } finally {
-      setIsThinking(false);
     }
+
+    // add assistant message
+    setMessages(prev => [...prev, { role: "assistant", text: finalReply, lang }]);
+
+    // speak reply
+    await speakText(finalReply, lang);
+
+    setThinking(false);
   };
 
-  // UI helpers
-  const lastMsgsRef = useRef(null);
-  useEffect(() => {
-    // auto-scroll
-    lastMsgsRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isThinking]);
-
-  // ------------------------- Render -------------------------
+  /* ------------------ Render UI ------------------ */
   if (!isLoggedIn) {
     return (
-      <div style={styles.container}>
+      <div style={styles.outer}>
         <div style={styles.card}>
-          <h2 style={styles.title}>💸 Owo — Personal Financial Assistant</h2>
+          <h2 style={{ margin: 0 }}>💸 Owo — Financial Assistant</h2>
+          <p style={{ color: "#cfcfcf" }}>Enter a username to continue (data stored in Firebase).</p>
           <input
-            placeholder="Enter username (e.g. michael)"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
+            placeholder="username (e.g. michael)"
             style={styles.input}
           />
-          <button onClick={handleLogin} style={styles.buttonPrimary}>Continue</button>
-          <p style={{ marginTop: 12, color: "#cfcfcf" }}>
-            Data is stored locally in your browser. Each username has private balance & history.
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={handleLogin} style={styles.primary}>Continue</button>
+            <button onClick={() => { setUsername("guest"); handleLogin(); }} style={styles.secondary}>Use guest</button>
+          </div>
+          <p style={{ fontSize: 12, color: "#9ca3af", marginTop: 10 }}>
+            Make sure your Firebase config is set in VITE_FIREBASE_CONFIG for persistent storage.
           </p>
         </div>
       </div>
     );
   }
 
-  const userKey = username.trim().toLowerCase();
-  const userData = users[userKey] || { balance: 0, transactions: [] };
-
+  // logged in view
   return (
-    <div style={styles.container}>
-      <div style={{ ...styles.card, width: 820, maxWidth: "95%" }}>
+    <div style={styles.outer}>
+      <div style={styles.cardLarge}>
         <div style={styles.header}>
           <div>
-            <h2 style={{ margin: 0 }}>💬 Owo — Multilingual Financial Assistant</h2>
-            <div style={{ fontSize: 13, color: "#cfcfcf" }}>Logged in as <b>{userKey}</b> • ₦{userData.balance}</div>
+            <h3 style={{ margin: 0 }}>💬 Owo</h3>
+            <div style={{ fontSize: 12, color: "#cfcfcf" }}>Logged in as <b>{username}</b> • ₦{userData.balance || "0"}</div>
           </div>
-          <div>
-            <button style={styles.smallButton} onClick={() => { navigator.clipboard?.writeText(window.location.href); }}>Copy Link</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button style={styles.tag} onClick={() => {
+              // refresh user data
+              (async () => {
+                const latest = await getLatestUserData(username.trim().toLowerCase());
+                if (latest) setUserData({ balance: latest.balance || 0, transactions: latest.transactions || [] });
+              })();
+            }}>Refresh</button>
+            <button style={styles.tag} onClick={() => {
+              // logout
+              setIsLoggedIn(false);
+              setUsername("");
+              setMessages([]);
+            }}>Logout</button>
           </div>
         </div>
 
         <div style={styles.chatWindow}>
           {messages.map((m, i) => (
             <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 8 }}>
-              <div style={{ ...styles.bubble, background: m.role === "user" ? "#6b21a8" : "#1f2937", color: "#fff", maxWidth: "78%" }}>
-                <div style={{ fontSize: 13, opacity: 0.9 }}>{m.text}</div>
+              <div style={{ maxWidth: "78%", padding: 12, borderRadius: 8, background: m.role === "user" ? "#6b21a8" : "#111827", color: "#fff", whiteSpace: "pre-wrap" }}>
+                {m.text}
               </div>
             </div>
           ))}
-          <div ref={lastMsgsRef} />
+          <div ref={bottomRef} />
         </div>
 
-        <div style={styles.controls}>
-          <button
-            title={isListening ? "Listening..." : "Start voice input"}
-            onClick={() => (isListening ? stopListening() : startListening())}
-            style={{ ...styles.micButton, background: isListening ? "#ef4444" : "#111827" }}
-          >
-            {isListening ? "● Listening" : "🎤 Speak"}
+        <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
+          <button onClick={() => (listening ? stopListening() : startListening())} style={{ padding: "10px 12px", borderRadius: 8, background: listening ? "#ef4444" : "#0f172a", color: "#fff", border: "none", cursor: "pointer" }}>
+            {listening ? "● Listening" : "🎤 Speak"}
           </button>
 
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your message here (e.g. Abeg send 2000 to Tunde)"
+            placeholder="Type or press Speak..."
             onKeyDown={(e) => e.key === "Enter" && handleSend()}
-            style={styles.chatInput}
-            disabled={isThinking}
+            style={{ flex: 1, padding: 10, borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", background: "#071024", color: "#fff" }}
           />
 
-          <button onClick={() => handleSend()} style={styles.buttonPrimary} disabled={isThinking}>
-            {isThinking ? "Thinking..." : "Send"}
+          <button onClick={() => handleSend()} style={styles.primary}>
+            Send
           </button>
         </div>
 
-        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
-          <div style={{ fontSize: 12, color: "#cfcfcf" }}>Quick examples:</div>
-          <button style={styles.tag} onClick={() => { setInput("Check my balance"); setTimeout(() => handleSend(), 50); }}>Check my balance</button>
-          <button style={styles.tag} onClick={() => { setInput("Abeg send 2000 to Tunde"); setTimeout(() => handleSend(), 50); }}>Abeg send 2000 to Tunde</button>
-          <button style={styles.tag} onClick={() => { setInput("Help me buy 100 airtime"); setTimeout(() => handleSend(), 50); }}>Buy airtime 100</button>
-          <button style={styles.tag} onClick={() => { setInput("Show my transaction history"); setTimeout(() => handleSend(), 50); }}>Show history</button>
+        <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+          <button style={styles.smallTag} onClick={() => { setInput("Check my balance"); setTimeout(() => handleSend(), 75); }}>Check my balance</button>
+          <button style={styles.smallTag} onClick={() => { setInput("Abeg send 2000 to Tunde"); setTimeout(() => handleSend(), 75); }}>Abeg send 2000 to Tunde</button>
+          <button style={styles.smallTag} onClick={() => { setInput("Help me buy 100 airtime"); setTimeout(() => handleSend(), 75); }}>Buy airtime 100</button>
+          <button style={styles.smallTag} onClick={() => { setInput("Show my transaction history"); setTimeout(() => handleSend(), 75); }}>Show history</button>
         </div>
       </div>
     </div>
   );
 }
 
-// ------------------------- Simple inline styles -------------------------
+/* ------------------ Styles ------------------ */
 const styles = {
-  container: {
+  outer: {
     minHeight: "100vh",
-    background: "linear-gradient(180deg,#0f172a 0%, #060818 100%)",
+    background: "linear-gradient(180deg,#020617 0%, #071024 100%)",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     padding: 20,
-    color: "#fff",
     fontFamily: "Inter, system-ui, sans-serif",
+    color: "#fff",
   },
   card: {
-    width: 900,
-    maxWidth: "95%",
-    background: "#0b1220",
+    width: 420,
+    padding: 20,
     borderRadius: 12,
-    padding: 18,
+    background: "#071027",
     boxShadow: "0 10px 30px rgba(2,6,23,0.8)",
+    textAlign: "center",
   },
-  title: {
-    marginBottom: 10,
-  },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
-  chatWindow: {
-    height: "55vh",
-    overflowY: "auto",
-    padding: 12,
-    borderRadius: 8,
-    background: "#081127",
-    border: "1px solid rgba(255,255,255,0.02)",
-    marginBottom: 12,
-  },
-  bubble: {
-    padding: 12,
-    borderRadius: 10,
-    lineHeight: 1.3,
-    whiteSpace: "pre-wrap",
-  },
-  controls: { display: "flex", gap: 8, alignItems: "center" },
-  chatInput: {
-    flex: 1,
-    minWidth: 0,
-    padding: "10px 12px",
+  input: {
+    width: "100%",
+    padding: 10,
+    marginTop: 12,
+    marginBottom: 8,
     borderRadius: 8,
     border: "1px solid rgba(255,255,255,0.06)",
-    background: "#0b1220",
+    background: "#061322",
     color: "#fff",
   },
-  buttonPrimary: {
+  primary: {
     padding: "10px 14px",
     borderRadius: 8,
     border: "none",
@@ -559,30 +531,47 @@ const styles = {
     color: "#fff",
     cursor: "pointer",
   },
-  smallButton: {
-    padding: "6px 8px",
-    borderRadius: 6,
-    background: "#0f172a",
+  secondary: {
+    padding: "10px 14px",
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.06)",
+    background: "transparent",
     color: "#fff",
-    border: "1px solid rgba(255,255,255,0.04)",
     cursor: "pointer",
   },
-  micButton: {
-    padding: "10px 12px",
+  cardLarge: {
+    width: 880,
+    maxWidth: "95%",
+    padding: 18,
+    borderRadius: 12,
+    background: "#071027",
+    boxShadow: "0 10px 30px rgba(2,6,23,0.8)",
+  },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
+  chatWindow: {
+    height: "55vh",
+    overflowY: "auto",
+    padding: 12,
     borderRadius: 8,
-    border: "none",
-    background: "#111827",
-    color: "#fff",
-    cursor: "pointer",
-    minWidth: 110,
+    background: "#040617",
+    border: "1px solid rgba(255,255,255,0.02)",
   },
   tag: {
-    background: "#111827",
+    padding: "8px 10px",
+    borderRadius: 8,
     border: "1px solid rgba(255,255,255,0.03)",
-    padding: "6px 8px",
-    borderRadius: 6,
-    cursor: "pointer",
+    background: "#0b1220",
     color: "#cfcfcf",
-    fontSize: 13,
+    cursor: "pointer",
   },
+  smallTag: {
+    padding: "6px 10px",
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.03)",
+    background: "#071022",
+    color: "#cfcfcf",
+    cursor: "pointer",
+    fontSize: 13,
+  }
 };
+
