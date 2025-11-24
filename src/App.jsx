@@ -13,18 +13,26 @@ export default function App() {
   const [isThinking, setIsThinking] = useState(false);
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
+  const chatEndRef = useRef(null);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   // ------------------------- TTS -------------------------
   const speakText = (text) => {
     if (!("speechSynthesis" in window)) return;
     const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = 1.1;
+    utter.pitch = 1.0;
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utter);
   };
 
   // ------------------------- Auth -------------------------
   const handleSignup = async () => {
-    if (!username || !password) return alert("Enter all fields");
+    if (!username || !password) return alert("Please enter both username and password");
     try {
       const res = await axios.post(`${API_URL}/signup`, { username, password });
       alert(res.data.message);
@@ -34,12 +42,13 @@ export default function App() {
   };
 
   const handleLogin = async () => {
-    if (!username || !password) return alert("Enter all fields");
+    if (!username || !password) return alert("Please enter both username and password");
     try {
       const res = await axios.post(`${API_URL}/login`, { username, password });
       setIsLoggedIn(true);
-      setMessages([{ role: "assistant", text: `Welcome ${username}. How can I assist you today?` }]);
-      speakText(`Welcome ${username}. How can I assist you today?`);
+      const welcomeMsg = `Hi ${username}! I'm SARA, your personal financial assistant. I'm here to help you manage your money. You can ask me to check your balance, buy airtime, transfer funds, or view your transaction history. What would you like to do?`;
+      setMessages([{ role: "assistant", text: welcomeMsg }]);
+      speakText(`Welcome back ${username}! How can I help you today?`);
     } catch (err) {
       alert(err.response?.data?.message || "Login failed");
     }
@@ -47,20 +56,49 @@ export default function App() {
 
   // ------------------------- Fetch History -------------------------
   const fetchHistory = async () => {
+    setIsThinking(true);
     try {
       const res = await axios.get(`${API_URL}/history/${username}`);
-      const historyText = res.data.transactions
-        .map(
-          (t) =>
-            `${new Date(t.date).toLocaleString()} — ${t.type} ₦${t.amount}${
-              t.to_user ? " → " + t.to_user : ""
-            }`
-        )
-        .join("\n");
-      setMessages((prev) => [...prev, { role: "assistant", text: historyText || "No transactions yet." }]);
-      speakText("Transaction history fetched.");
-    } catch {
-      setMessages((prev) => [...prev, { role: "assistant", text: "Could not fetch history." }]);
+      
+      if (!res.data.transactions || res.data.transactions.length === 0) {
+        setMessages((prev) => [...prev, { 
+          role: "assistant", 
+          text: "You don't have any transaction history yet. Start by checking your balance or making a transaction!" 
+        }]);
+        speakText("You have no transactions yet.");
+      } else {
+        const historyText = "📊 Here's your recent transaction history:\n\n" + 
+          res.data.transactions
+            .map((t) => {
+              const date = new Date(t.date).toLocaleString('en-NG', {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+              });
+              
+              let emoji = "💳";
+              if (t.type === "Airtime") emoji = "📱";
+              if (t.type === "Transfer") emoji = "💸";
+              if (t.type === "Received") emoji = "💰";
+              
+              return `${emoji} ${date} — ${t.type} ₦${t.amount.toLocaleString()}${
+                t.to_user && t.to_user !== "Self" ? " → " + t.to_user : ""
+              }`;
+            })
+            .join("\n");
+        
+        setMessages((prev) => [...prev, { role: "assistant", text: historyText }]);
+        speakText("Here's your transaction history.");
+      }
+    } catch (err) {
+      setMessages((prev) => [...prev, { 
+        role: "assistant", 
+        text: "Oops! I couldn't fetch your transaction history. Please try again." 
+      }]);
+      speakText("Could not fetch history.");
+    } finally {
+      setIsThinking(false);
     }
   };
 
@@ -68,8 +106,12 @@ export default function App() {
   const handleSend = async (explicitText) => {
     const text = explicitText ?? input;
     if (!text.trim()) return;
+    
     if (!isLoggedIn) {
-      setMessages((prev) => [...prev, { role: "assistant", text: "Please login first." }]);
+      setMessages((prev) => [...prev, { 
+        role: "assistant", 
+        text: "Please login first to use SARA's services." 
+      }]);
       return;
     }
 
@@ -79,11 +121,13 @@ export default function App() {
 
     try {
       const res = await axios.post(`${API_URL}/action`, { username, text });
-      const reply = res.data.balance !== undefined ? `Your balance: ₦${res.data.balance}` : res.data.message;
+      const reply = res.data.message;
       setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
       speakText(reply);
     } catch (err) {
-      setMessages((prev) => [...prev, { role: "assistant", text: "Server error. Try again." }]);
+      const errorMsg = err.response?.data?.message || "Sorry, something went wrong. Please try again.";
+      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
+      speakText(errorMsg);
     } finally {
       setIsThinking(false);
     }
@@ -92,7 +136,10 @@ export default function App() {
   // ------------------------- Speech recognition -------------------------
   const startListening = useCallback(() => {
     if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
-      setMessages((prev) => [...prev, { role: "assistant", text: "Voice input not supported." }]);
+      setMessages((prev) => [...prev, { 
+        role: "assistant", 
+        text: "Sorry, voice input is not supported in your browser. Try Chrome or Edge!" 
+      }]);
       return;
     }
 
@@ -109,17 +156,25 @@ export default function App() {
       recognition.stop();
       handleSend(transcript);
     };
-    recognition.onerror = () => setIsListening(false);
+    recognition.onerror = () => {
+      setIsListening(false);
+      setMessages((prev) => [...prev, { 
+        role: "assistant", 
+        text: "I couldn't hear that clearly. Please try again." 
+      }]);
+    };
     recognition.onend = () => setIsListening(false);
 
     recognitionRef.current = recognition;
     recognition.start();
-  }, []);
+  }, [username, isLoggedIn]);
 
   const stopListening = () => {
     try {
       recognitionRef.current?.stop();
-    } catch {}
+    } catch (err) {
+      console.log("Stop listening error:", err);
+    }
     setIsListening(false);
   };
 
@@ -128,12 +183,16 @@ export default function App() {
     return (
       <div style={styles.container}>
         <div style={styles.card}>
-          <h2 style={styles.title}>💸 SARA — Personal Financial Assistant</h2>
+          <div style={styles.header}>
+            <h1 style={styles.title}>💸 SARA</h1>
+            <p style={styles.subtitle}>Your Personal Financial Assistant</p>
+          </div>
           <input
             placeholder="Username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             style={styles.input}
+            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
           />
           <input
             type="password"
@@ -141,14 +200,19 @@ export default function App() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             style={styles.input}
+            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
           />
-          <button onClick={handleSignup} style={styles.buttonPrimary}>
-            Sign Up
-          </button>
-          <button onClick={handleLogin} style={styles.buttonPrimary}>
-            Login
-          </button>
-          <p style={{ marginTop: 12, color: "#cfcfcf" }}>Your account is securely stored using SQLite.</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={handleLogin} style={styles.buttonPrimary}>
+              Login
+            </button>
+            <button onClick={handleSignup} style={styles.buttonSecondary}>
+              Sign Up
+            </button>
+          </div>
+          <p style={styles.infoText}>
+            🔒 Your account is securely stored. New here? Sign up to get started with ₦10,000!
+          </p>
         </div>
       </div>
     );
@@ -157,6 +221,21 @@ export default function App() {
   return (
     <div style={styles.container}>
       <div style={styles.card}>
+        <div style={styles.header}>
+          <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
+          <button 
+            onClick={() => {
+              setIsLoggedIn(false);
+              setMessages([]);
+              setUsername("");
+              setPassword("");
+            }} 
+            style={styles.logoutButton}
+          >
+            Logout
+          </button>
+        </div>
+
         <div style={styles.chatWindow}>
           {messages.map((m, idx) => (
             <div
@@ -164,26 +243,45 @@ export default function App() {
               style={{
                 ...styles.bubble,
                 background: m.role === "user" ? "#1f2937" : "#4b5563",
+                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                maxWidth: "80%",
               }}
             >
               {m.text}
             </div>
           ))}
-          {isThinking && <div style={styles.bubble}>SARA is thinking...</div>}
+          {isThinking && (
+            <div style={{ ...styles.bubble, background: "#4b5563" }}>
+              <span style={styles.typingDots}>SARA is thinking</span>
+              <span style={styles.dot}>.</span>
+              <span style={styles.dot}>.</span>
+              <span style={styles.dot}>.</span>
+            </div>
+          )}
+          <div ref={chatEndRef} />
         </div>
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-          <button onClick={() => handleSend("check balance")} style={styles.buttonPrimary}>
-            Check Balance
+        <div style={styles.quickActions}>
+          <button 
+            onClick={() => handleSend("check balance")} 
+            style={styles.quickButton}
+            disabled={isThinking}
+          >
+            💰 Balance
           </button>
-          <button onClick={() => handleSend("buy 100 airtime")} style={styles.buttonPrimary}>
-            Buy Airtime
+          <button 
+            onClick={() => handleSend("buy 100 airtime")} 
+            style={styles.quickButton}
+            disabled={isThinking}
+          >
+            📱 Airtime
           </button>
-          <button onClick={() => handleSend("transfer 1000 to friend")} style={styles.buttonPrimary}>
-            Transfer
-          </button>
-          <button onClick={fetchHistory} style={styles.buttonPrimary}>
-            Show History
+          <button 
+            onClick={fetchHistory} 
+            style={styles.quickButton}
+            disabled={isThinking}
+          >
+            📊 History
           </button>
         </div>
 
@@ -191,15 +289,27 @@ export default function App() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type a message"
+            placeholder="Type a message or tap the mic..."
             style={styles.chatInput}
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
+            onKeyDown={(e) => e.key === "Enter" && !isThinking && handleSend()}
+            disabled={isThinking}
           />
-          <button onClick={() => handleSend()} style={styles.buttonPrimary}>
+          <button 
+            onClick={() => handleSend()} 
+            style={styles.sendButton}
+            disabled={isThinking || !input.trim()}
+          >
             Send
           </button>
-          <button onClick={isListening ? stopListening : startListening} style={styles.buttonPrimary}>
-            {isListening ? "Stop" : "🎤"}
+          <button 
+            onClick={isListening ? stopListening : startListening} 
+            style={{
+              ...styles.micButton,
+              background: isListening ? "#ef4444" : "#7c3aed"
+            }}
+            disabled={isThinking}
+          >
+            {isListening ? "⏹️" : "🎤"}
           </button>
         </div>
       </div>
@@ -223,25 +333,146 @@ const styles = {
     width: 900,
     maxWidth: "95%",
     background: "#0b1220",
-    borderRadius: 12,
-    padding: 18,
-    boxShadow: "0 10px 30px rgba(2,6,23,0.8)",
+    borderRadius: 16,
+    padding: 24,
+    boxShadow: "0 20px 50px rgba(2,6,23,0.9)",
   },
-  title: { marginBottom: 10 },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 20,
+  },
+  title: { 
+    margin: 0,
+    fontSize: 24,
+    fontWeight: 700,
+  },
+  subtitle: {
+    margin: "8px 0 0 0",
+    fontSize: 16,
+    color: "#94a3b8",
+  },
   chatWindow: {
     height: "55vh",
     overflowY: "auto",
-    padding: 12,
-    borderRadius: 8,
+    padding: 16,
+    borderRadius: 12,
     background: "#081127",
-    border: "1px solid rgba(255,255,255,0.02)",
-    marginBottom: 12,
+    border: "1px solid rgba(255,255,255,0.05)",
+    marginBottom: 16,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
   },
-  bubble: { padding: 12, borderRadius: 10, lineHeight: 1.3, marginBottom: 8, whiteSpace: "pre-wrap" },
-  controls: { display: "flex", gap: 8, alignItems: "center" },
-  chatInput: { flex: 1, padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", background: "#0b1220", color: "#fff" },
-  input: { width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", background: "#0b1220", color: "#fff", marginBottom: 12 },
-  buttonPrimary: { padding: "10px 14px", borderRadius: 8, border: "none", background: "#7c3aed", color: "#fff", cursor: "pointer" },
+  bubble: { 
+    padding: 14, 
+    borderRadius: 12, 
+    lineHeight: 1.5, 
+    whiteSpace: "pre-wrap",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+  },
+  quickActions: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 12,
+    flexWrap: "wrap",
+  },
+  quickButton: {
+    padding: "8px 16px",
+    borderRadius: 8,
+    border: "1px solid rgba(124,58,237,0.3)",
+    background: "rgba(124,58,237,0.1)",
+    color: "#a78bfa",
+    cursor: "pointer",
+    fontSize: 14,
+    fontWeight: 500,
+    transition: "all 0.2s",
+  },
+  controls: { 
+    display: "flex", 
+    gap: 8, 
+    alignItems: "center" 
+  },
+  chatInput: { 
+    flex: 1, 
+    padding: "12px 16px", 
+    borderRadius: 10, 
+    border: "1px solid rgba(255,255,255,0.08)", 
+    background: "#0b1220", 
+    color: "#fff",
+    fontSize: 15,
+  },
+  input: { 
+    width: "100%", 
+    padding: "12px 16px", 
+    borderRadius: 10, 
+    border: "1px solid rgba(255,255,255,0.08)", 
+    background: "#0b1220", 
+    color: "#fff", 
+    marginBottom: 12,
+    fontSize: 15,
+  },
+  buttonPrimary: { 
+    flex: 1,
+    padding: "12px 16px", 
+    borderRadius: 10, 
+    border: "none", 
+    background: "#7c3aed", 
+    color: "#fff", 
+    cursor: "pointer",
+    fontWeight: 600,
+    fontSize: 15,
+  },
+  buttonSecondary: {
+    flex: 1,
+    padding: "12px 16px",
+    borderRadius: 10,
+    border: "1px solid rgba(124,58,237,0.5)",
+    background: "transparent",
+    color: "#a78bfa",
+    cursor: "pointer",
+    fontWeight: 600,
+    fontSize: 15,
+  },
+  sendButton: {
+    padding: "12px 24px",
+    borderRadius: 10,
+    border: "none",
+    background: "#7c3aed",
+    color: "#fff",
+    cursor: "pointer",
+    fontWeight: 600,
+  },
+  micButton: {
+    padding: "12px 16px",
+    borderRadius: 10,
+    border: "none",
+    color: "#fff",
+    cursor: "pointer",
+    fontSize: 18,
+  },
+  logoutButton: {
+    padding: "8px 16px",
+    borderRadius: 8,
+    border: "1px solid rgba(239,68,68,0.3)",
+    background: "rgba(239,68,68,0.1)",
+    color: "#f87171",
+    cursor: "pointer",
+    fontSize: 14,
+  },
+  infoText: {
+    marginTop: 16,
+    fontSize: 13,
+    color: "#64748b",
+    textAlign: "center",
+  },
+  typingDots: {
+    display: "inline-block",
+  },
+  dot: {
+    animation: "blink 1.4s infinite",
+    fontSize: 20,
+  },
 };
-
 
