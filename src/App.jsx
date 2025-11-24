@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef, useCallback } from "react";
 import axios from "axios";
 
 // ------------------------- Backend URL -------------------------
-const API_URL = "https://your-backend.onrender.com"; // <-- replace with your deployed backend URL
+const API_URL = "https://Iya-Bolanle-backend.onrender.com"; // <-- replace with your deployed backend URL
 
 export default function App() {
   const [username, setUsername] = useState("");
