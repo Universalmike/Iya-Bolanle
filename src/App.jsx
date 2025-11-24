@@ -20,7 +20,6 @@ try {
   console.warn("Gemini init failed — running simulated mode.", e);
 }
 
-// Helper to get model instance (safe)
 const getModel = (modelName = "models/gemini-2.5-flash") => {
   if (!genAI) return null;
   try {
@@ -31,34 +30,32 @@ const getModel = (modelName = "models/gemini-2.5-flash") => {
   }
 };
 
-// ------------------------- Util: Language & Text Helpers -------------------------
+// ------------------------- Language Detection -------------------------
 const detectLanguage = (text = "") => {
   if (!text) return "english";
   const s = text.toLowerCase();
 
-  // pidgin keywords
-  if (/\b(abeg|wey|una|omi|omo|i go|i go do|na)\b/.test(s)) return "pidgin";
+  // Enhanced Pidgin detection (more keywords)
+  if (/\b(abeg|wey|una|omo|i go|na so|wetin|dey|make|e be like|sef|o|shey|dem)\b/.test(s)) return "pidgin";
 
-  // yoruba detection (common characters / words)
-  if (/[ṣọạẹẹọẹọ́àèìòùẹ]/.test(s) || /\b(mi |mi o|kin ni|se|owo|abẹ|gba)\b/.test(s)) return "yoruba";
+  // Enhanced Yoruba detection (more diacritics and common words)
+  if (/[ṣọẹ́àèìòù]/i.test(s) || /\b(mi|ni|ti|kin|se|owo|je|lo|wa|ba|gba|fun|lati|nigba|abi)\b/.test(s)) return "yoruba";
 
-  // igbo detection
-  if (/\b(biko|nna|nne|ego|kedu|ime|onye)\b/.test(s) || /ị|ịbụ|ọzọ/.test(s)) return "igbo";
+  // Enhanced Igbo detection
+  if (/\b(biko|nna|nne|ego|kedu|ime|onye|na|nwa|ya|ka|di|gi|anyi|obi)\b/.test(s) || /[ịọụ]/i.test(s)) return "igbo";
 
-  // hausa detection
-  if (/\b(kai|ina|yaya|sannu|don Allah|wallahi)\b/.test(s)) return "hausa";
+  // Enhanced Hausa detection
+  if (/\b(kai|ina|yaya|sannu|don allah|wallahi|kuma|da|a|ba|na|ta|ga|yi|ce|ko)\b/.test(s)) return "hausa";
 
   // default english
   return "english";
 };
 
-// FIX 1: Utility to strip emojis from text for TTS
+// ------------------------- Text-to-Speech Helpers -------------------------
 const stripEmojis = (text) => {
-  // Regex matches various unicode ranges commonly used for emojis and symbols
   return text.replace(/(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g, '');
 };
 
-// ------------------------- TTS voice picker & helpers -------------------------
 const pickVoiceForLanguage = (lang) => {
   const voices = window.speechSynthesis.getVoices() || [];
   if (!voices.length) return null;
@@ -66,12 +63,10 @@ const pickVoiceForLanguage = (lang) => {
   const findPrefer = (pattern) =>
     voices.find((v) => v.lang && v.lang.toLowerCase().includes(pattern));
 
-  // prefer Nigerian-en when available (en-ng)
   if (lang === "pidgin" || lang === "yoruba" || lang === "igbo" || lang === "hausa") {
     return findPrefer("en-ng") || findPrefer("en-gb") || voices[0];
   }
 
-  // english default: en-us > en-gb
   return findPrefer("en-us") || findPrefer("en-gb") || voices[0];
 };
 
@@ -80,15 +75,12 @@ const speakText = (text, lang = "english", opts = {}) => {
   try {
     window.speechSynthesis.cancel();
     
-    // FIX 1: Clean the text before speaking
     const cleanText = stripEmojis(text); 
     const utter = new SpeechSynthesisUtterance(cleanText);
 
-    // set voice & lang code if possible
     const voice = pickVoiceForLanguage(lang);
     if (voice) utter.voice = voice;
 
-    // tune rate/pitch roughly per language to mimic cadence
     switch (lang) {
       case "yoruba":
         utter.rate = opts.rate ?? 0.92;
@@ -117,13 +109,11 @@ const speakText = (text, lang = "english", opts = {}) => {
   }
 };
 
-// ensure voices loaded in some browsers
 const ensureVoicesLoaded = () => {
   return new Promise((res) => {
     const voices = window.speechSynthesis.getVoices();
     if (voices && voices.length) return res(true);
     window.speechSynthesis.onvoiceschanged = () => res(true);
-    // fallback timeout
     setTimeout(() => res(!!window.speechSynthesis.getVoices().length), 1500);
   });
 };
@@ -145,51 +135,40 @@ const saveAllUsers = (obj) => {
   localStorage.setItem(USERS_KEY, JSON.stringify(obj));
 };
 
-// ------------------------- Intent extraction (simple heuristics) -------------------------
+// ------------------------- Intent extraction -------------------------
 const parseIntentFromText = (text) => {
   const s = text.toLowerCase();
   
-  // FIX 2: Robust number parsing (handling commas and simple number words)
   let amount = null;
   
-  // 1. Try to find a number written in digits (handling commas: 1000, 1,000)
-  // Regex: Finds 1-3 digits, optionally followed by groups of ',3 digits' OR finds any single digit group
   let numMatch = s.match(/(\d{1,3}(,\d{3})*|\d+)/);
   if (numMatch) {
-      amount = parseInt(numMatch[0].replace(/,/g, ''), 10);
+    amount = parseInt(numMatch[0].replace(/,/g, ''), 10);
   }
   
-  // 2. If no number is found, check for the word 'thousand' to multiply
   if (!amount) {
-      // Look for number words followed by 'thousand' (e.g., two thousand)
-      const wordMatch = s.match(/\b(one|two|three|four|five|ten|twenty)\s+thousand\b/);
-      if (wordMatch) {
-          const multiplierMap = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'twenty': 20 };
-          const word = wordMatch[1];
-          amount = multiplierMap[word] * 1000;
-      }
+    const wordMatch = s.match(/\b(one|two|three|four|five|ten|twenty)\s+thousand\b/);
+    if (wordMatch) {
+      const multiplierMap = { 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'ten': 10, 'twenty': 20 };
+      const word = wordMatch[1];
+      amount = multiplierMap[word] * 1000;
+    }
   }
 
-
-  // transfer patterns
   if (/\b(send|transfer|pay|give|transfer to|send to)\b/.test(s)) {
-    // recipient heuristics: "to NAME" or "give NAME"
     const toMatch = s.match(/\b(?:to|give|for)\s+([A-Za-z0-9_]+)/);
     const recipient = toMatch ? toMatch[1] : "recipient";
     return { intent: "transfer", amount, recipient };
   }
 
-  // airtime
   if (/\b(airtime|recharge|top ?up)\b/.test(s)) {
     return { intent: "buy_airtime", amount, recipient: null };
   }
 
-  // balance
   if (/\b(balance|how much|how many|remain|wetin be my balance|kin ni balance)\b/.test(s)) {
     return { intent: "check_balance" };
   }
 
-  // transactions/history
   if (/\b(history|transactions|last transactions|transaction history|show transactions)\b/.test(s)) {
     return { intent: "show_transaction_history" };
   }
@@ -199,24 +178,18 @@ const parseIntentFromText = (text) => {
 
 // ------------------------- Main App component -------------------------
 export default function App() {
-  // user/session state
   const [username, setUsername] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [users, setUsers] = useState(() => loadAllUsers());
-
-  // chat state
-  const [messages, setMessages] = useState([]); // {role: 'user'|'assistant', text: '', lang }
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
 
-  // speech recognition refs
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
 
-  // ensure voices loaded on mount
   useEffect(() => {
     ensureVoicesLoaded();
-    // greet
     speakText("Owo ready. Please login to continue.", "english");
   }, []);
 
@@ -227,7 +200,7 @@ export default function App() {
     if (!existing) {
       const newUsers = {
         ...users,
-        [clean]: { balance: 10000, transactions: [] }, // start balance ₦10,000
+        [clean]: { balance: 10000, transactions: [] },
       };
       setUsers(newUsers);
       saveAllUsers(newUsers);
@@ -245,7 +218,86 @@ export default function App() {
     speakText(`Welcome ${clean}. How can I help you today?`, "english");
   };
 
-  // ------------------------- Speech recognition (voice input) -------------------------
+  const saveUserUpdates = (userKey, updates) => {
+    const fresh = { ...users, [userKey]: { ...users[userKey], ...updates } };
+    setUsers(fresh);
+    saveAllUsers(fresh);
+  };
+
+  // ------------------------- Transaction Actions -------------------------
+  const runSimulatedAction = (userKey, parsedIntent, userLang = "english") => {
+    const userData = users[userKey];
+    if (!userData) return "User account missing.";
+
+    const { intent, amount, recipient } = parsedIntent;
+
+    const responses = {
+      check_balance: {
+        english: `💰 Your balance is ₦${userData.balance}.`,
+        pidgin: `💰 Your balance na ₦${userData.balance}.`,
+        yoruba: `💰 Owó tó wà nílẹ̀ rẹ jẹ́ ₦${userData.balance}.`,
+        igbo: `💰 Ego gị bụ ₦${userData.balance}.`,
+        hausa: `💰 Kuɗin ku ya kai ₦${userData.balance}.`
+      },
+      insufficient_funds: {
+        english: "Transaction failed: insufficient funds.",
+        pidgin: "E no work o: money no reach.",
+        yoruba: "Ìṣòwò kò ṣe: owó kò tó.",
+        igbo: "Azụmahịa adabeghị: ego ezughị.",
+        hausa: "Cinikin ya kasa: kuɗi bai isa ba."
+      },
+      transfer_success: (amt, recip, newBal) => ({
+        english: `✅ Transfer of ₦${amt} to ${recip} completed. New balance: ₦${newBal}.`,
+        pidgin: `✅ I don send ₦${amt} give ${recip}. Your balance now na ₦${newBal}.`,
+        yoruba: `✅ Mo ti fi ₦${amt} ránṣẹ́ sí ${recip}. Owó tó kù: ₦${newBal}.`,
+        igbo: `✅ E zigara ${recip} ₦${amt}. Ego fọdụrụ: ₦${newBal}.`,
+        hausa: `✅ An aika ₦${amt} zuwa ${recip}. Saura: ₦${newBal}.`
+      }),
+      airtime_success: (amt, newBal) => ({
+        english: `📱 Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`,
+        pidgin: `📱 I don buy ₦${amt} airtime. Your balance now na ₦${newBal}.`,
+        yoruba: `📱 Mo ti ra airtime ₦${amt}. Owó tó kù: ₦${newBal}.`,
+        igbo: `📱 E zụtara airtime ₦${amt}. Ego fọdụrụ: ₦${newBal}.`,
+        hausa: `📱 An sayi airtime ₦${amt}. Saura: ₦${newBal}.`
+      })
+    };
+
+    if (intent === "check_balance") {
+      return responses.check_balance[userLang] || responses.check_balance.english;
+    }
+
+    if (intent === "transfer") {
+      const amt = amount || 0;
+      if (amt <= 0) return "Please specify a valid amount.";
+      if (userData.balance < amt) return responses.insufficient_funds[userLang] || responses.insufficient_funds.english;
+      const newBal = userData.balance - amt;
+      const tx = { type: "Transfer", amount: amt, to: recipient || "recipient", date: new Date().toLocaleString() };
+      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
+      const successMsg = responses.transfer_success(amt, recipient || "recipient", newBal);
+      return successMsg[userLang] || successMsg.english;
+    }
+
+    if (intent === "buy_airtime") {
+      const amt = amount || 0;
+      if (amt <= 0) return "Please specify airtime amount.";
+      if (userData.balance < amt) return responses.insufficient_funds[userLang] || responses.insufficient_funds.english;
+      const newBal = userData.balance - amt;
+      const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toLocaleString() };
+      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
+      const successMsg = responses.airtime_success(amt, newBal);
+      return successMsg[userLang] || successMsg.english;
+    }
+
+    if (intent === "show_transaction_history") {
+      const slice = (userData.transactions || []).slice(-8).reverse();
+      if (!slice.length) return "You have no transactions yet.";
+      return "📜 Recent transactions:\n" + slice.map(t => `${t.date} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
+    }
+
+    return null;
+  };
+
+  // ------------------------- Speech recognition -------------------------
   const startListening = useCallback(() => {
     if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
       setMessages((prev) => [...prev, { role: "assistant", text: "Voice input not supported in this browser.", lang: "english" }]);
@@ -254,7 +306,7 @@ export default function App() {
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-    recognition.lang = "en-NG"; // Accept Nigerian English
+    recognition.lang = "en-NG";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
@@ -266,7 +318,6 @@ export default function App() {
       setIsListening(false);
       recognition.stop();
       setInput(transcript);
-      // auto-send
       handleSend(transcript);
     };
     recognition.onerror = (e) => {
@@ -289,52 +340,6 @@ export default function App() {
     setIsListening(false);
   };
 
-  // ------------------------- Simulated transaction actions -------------------------
-  const saveUserUpdates = (userKey, updates) => {
-    const fresh = { ...users, [userKey]: { ...users[userKey], ...updates } };
-    setUsers(fresh);
-    saveAllUsers(fresh);
-  };
-
-  const runSimulatedAction = (userKey, parsedIntent) => {
-    const userData = users[userKey];
-    if (!userData) return "User account missing.";
-
-    const { intent, amount, recipient } = parsedIntent;
-
-    if (intent === "check_balance") {
-      return `💰 Your balance is ₦${userData.balance}.`;
-    }
-
-    if (intent === "transfer") {
-      const amt = amount || 0;
-      if (amt <= 0) return "Please specify a valid amount.";
-      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
-      const newBal = userData.balance - amt;
-      const tx = { type: "Transfer", amount: amt, to: recipient || "recipient", date: new Date().toLocaleString() };
-      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
-      return `✅ Transfer of ₦${amt} to ${recipient || "recipient"} completed. New balance: ₦${newBal}.`;
-    }
-
-    if (intent === "buy_airtime") {
-      const amt = amount || 0;
-      if (amt <= 0) return "Please specify airtime amount.";
-      if (userData.balance < amt) return "Transaction failed: insufficient funds.";
-      const newBal = userData.balance - amt;
-      const tx = { type: "Airtime", amount: amt, to: "Self", date: new Date().toLocaleString() };
-      saveUserUpdates(userKey, { balance: newBal, transactions: [...userData.transactions, tx] });
-      return `📱 Airtime purchase of ₦${amt} successful. New balance: ₦${newBal}.`;
-    }
-
-    if (intent === "show_transaction_history") {
-      const slice = (userData.transactions || []).slice(-8).reverse();
-      if (!slice.length) return "You have no transactions yet.";
-      return "📜 Recent transactions:\n" + slice.map(t => `${t.date} — ${t.type} — ₦${t.amount}${t.to ? ` — to ${t.to}` : ""}`).join("\n");
-    }
-
-    return null;
-  };
-
   // ------------------------- Core: send message & process -------------------------
   const handleSend = async (explicitText) => {
     const text = explicitText !== undefined ? explicitText : input;
@@ -345,8 +350,8 @@ export default function App() {
     }
 
     const userKey = username.trim().toLowerCase();
+    const userData = users[userKey];
 
-    // append user message
     const userLang = detectLanguage(text);
     setMessages((prev) => [...prev, { role: "user", text, lang: userLang }]);
     setInput("");
@@ -354,42 +359,45 @@ export default function App() {
     setIsThinking(true);
 
     try {
-      // FIX 3: Enhanced System Prompt
-      const systemPrompt = `
-You are Owo, a Nigerian multilingual financial assistant.
-You MUST ALWAYS reply 100% in the same language the user used: 
-- English
-- Nigerian Pidgin
-- Yoruba
-- Igbo
-- Hausa
+      const languageInstructions = {
+        english: "Respond in natural English",
+        pidgin: "Respond ONLY in Nigerian Pidgin English. Use phrases like 'abeg', 'wetin', 'e be like say', 'omo', 'wahala', 'shey', 'o'. Be very natural and conversational.",
+        yoruba: "Respond ONLY in Yoruba language. Use proper Yoruba expressions with diacritics like ẹ, ọ, ṣ. Examples: 'Báwo ni', 'Ṣe daadaa', 'Mo gbọ́', 'Kò sí wàhálà'",
+        igbo: "Respond ONLY in Igbo language. Use natural Igbo with proper tone marks like ị, ọ, ụ. Examples: 'Ọ dị mma', 'Kedu', 'Biko', 'Nke ọma'",
+        hausa: "Respond ONLY in Hausa language. Use natural Hausa expressions. Examples: 'Sannu', 'Yaya kake', 'To madalla', 'Don Allah'"
+      };
 
-Important rules:
-1. Detect the user language from each message.
-2. Respond ONLY in that language. Never mix languages.
-3. Use natural expressions, tone, and accent typical for native speakers.
-4. Keep responses short and friendly.
-5. If user writes in Yoruba, respond fully in Yoruba (not English-like Yoruba).
-6. If user writes in Igbo, respond fully in Igbo.
-7. If user writes in Hausa, respond fully in Hausa.
-`;
+      const systemPrompt = `You are Owo, a Nigerian multilingual financial assistant.
 
-      // build conversation context (last ~10 messages to keep prompt small)
-      const shortHistory = messages.slice(-8).map(m => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`);
-      const inputTurn = `User (${userLang}): ${text}`;
+CRITICAL: The user is speaking in ${userLang.toUpperCase()}.
+${languageInstructions[userLang]}
+
+Rules:
+1. Reply 100% in ${userLang.toUpperCase()} - DO NOT use English or any other language
+2. Keep responses SHORT (1-2 sentences) and friendly
+3. Use natural, conversational tone for native speakers
+4. For financial transactions, confirm details in ${userLang.toUpperCase()}
+
+User's current balance: ₦${userData.balance}`;
+
+      const shortHistory = messages.slice(-6).map(m => 
+        `${m.role === "user" ? "User" : "Assistant"} (${m.lang}): ${m.text}`
+      ).join("\n");
 
       let botReplyText = null;
       const model = getModel("models/gemini-2.5-flash");
       if (model) {
         try {
-          const response = await model.generateContent({
-            contents: [
-              { parts: [{ text: systemPrompt }] },
-              { parts: [{ text: shortHistory.join("\n") }] },
-              { parts: [{ text: inputTurn }] }
-            ],
-            model: "models/gemini-2.5-flash"
-          });
+          const fullPrompt = `${systemPrompt}
+
+Previous conversation:
+${shortHistory}
+
+User (${userLang}): ${text}
+
+Assistant (${userLang}):`;
+
+          const response = await model.generateContent(fullPrompt);
 
           const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (candidate) botReplyText = candidate;
@@ -401,11 +409,18 @@ Important rules:
       }
 
       if (!botReplyText) {
-        botReplyText = userLang === "pidgin" ? "Okay, make I check am..." : "Alright, let me handle that for you...";
+        const fallbacks = {
+          pidgin: "Okay, make I check am... Wetin you wan make I do?",
+          yoruba: "Ó dára, jẹ́ ń wo ó... Kí ni mo lè ṣe fún ọ?",
+          igbo: "Ọ dị mma, ka m lelee ya... Gịnị ka m ga-eme?",
+          hausa: "To madalla, bari in duba... Me zan yi?",
+          english: "Alright, let me check that for you..."
+        };
+        botReplyText = fallbacks[userLang] || fallbacks.english;
       }
 
       const parsed = parseIntentFromText(text);
-      const simulated = runSimulatedAction(userKey, parsed);
+      const simulated = runSimulatedAction(userKey, parsed, userLang);
 
       let finalReply = simulated || botReplyText;
 
@@ -422,10 +437,8 @@ Important rules:
     }
   };
 
-  // UI helpers
   const lastMsgsRef = useRef(null);
   useEffect(() => {
-    // auto-scroll
     lastMsgsRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isThinking]);
 
@@ -500,19 +513,21 @@ Important rules:
           </button>
         </div>
 
-        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
-          <div style={{ fontSize: 12, color: "#cfcfcf" }}>Quick examples:</div>
-          <button style={styles.tag} onClick={() => { setInput("Check my balance"); setTimeout(() => handleSend(), 50); }}>Check my balance</button>
-          <button style={styles.tag} onClick={() => { setInput("Abeg send 2000 to Tunde"); setTimeout(() => handleSend(), 50); }}>Abeg send 2000 to Tunde</button>
+        <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <div style={{ fontSize: 12, color: "#cfcfcf", width: "100%", marginBottom: 4 }}>Quick examples:</div>
+          <button style={styles.tag} onClick={() => { setInput("Check my balance"); setTimeout(() => handleSend(), 50); }}>Check balance</button>
+          <button style={styles.tag} onClick={() => { setInput("Abeg check my balance"); setTimeout(() => handleSend(), 50); }}>Abeg check my balance (Pidgin)</button>
+          <button style={styles.tag} onClick={() => { setInput("Abeg send 2000 to Tunde"); setTimeout(() => handleSend(), 50); }}>Abeg send 2000 (Pidgin)</button>
+          <button style={styles.tag} onClick={() => { setInput("Ṣe àyẹ̀wò owó mi"); setTimeout(() => handleSend(), 50); }}>Ṣe àyẹ̀wò owó (Yoruba)</button>
+          <button style={styles.tag} onClick={() => { setInput("Biko lelee ego m"); setTimeout(() => handleSend(), 50); }}>Biko lelee ego (Igbo)</button>
           <button style={styles.tag} onClick={() => { setInput("Help me buy 100 airtime"); setTimeout(() => handleSend(), 50); }}>Buy airtime 100</button>
-          <button style={styles.tag} onClick={() => { setInput("Show my transaction history"); setTimeout(() => handleSend(), 50); }}>Show history</button>
         </div>
       </div>
     </div>
   );
 }
 
-// ------------------------- Simple inline styles -------------------------
+// ------------------------- Styles -------------------------
 const styles = {
   container: {
     minHeight: "100vh",
@@ -560,6 +575,15 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.06)",
     background: "#0b1220",
     color: "#fff",
+  },
+  input: {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.06)",
+    background: "#0b1220",
+    color: "#fff",
+    marginBottom: 12,
   },
   buttonPrimary: {
     padding: "10px 14px",
