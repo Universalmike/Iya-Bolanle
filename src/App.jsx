@@ -129,7 +129,7 @@ export default function App() {
           <button onClick={handleSignup} style={styles.buttonPrimary}>Sign Up</button>
           <button onClick={handleLogin} style={styles.buttonPrimary}>Login</button>
           <p style={{ marginTop: 12, color: "#cfcfcf" }}>
-            Your account is securely stored using SQLite database.
+            Log In now. No account? Sign up
           </p>
         </div>
       </div>
@@ -158,6 +158,21 @@ export default function App() {
           <button onClick={() => handleSend()} style={styles.buttonPrimary}>Send</button>
           <button onClick={isListening ? stopListening : startListening} style={styles.buttonPrimary}>
             {isListening ? "Stop" : "🎤"}
+          </button>
+          <button onClick={async () => {
+              try {
+                const res = await axios.get(`${API_URL}/history/${username}`);
+                const historyText = res.data.transactions.map(
+                  t => `${t.date.split("T")[0]}: ${t.type} ₦${t.amount} ${t.to_user ? "→ " + t.to_user : ""}`
+                ).join("\n");
+                setMessages(prev => [...prev, { role: "assistant", text: historyText }]);
+              } catch {
+                setMessages(prev => [...prev, { role: "assistant", text: "Could not fetch history." }]);
+              }
+            }}
+            style={styles.buttonPrimary}
+          >
+            Show History
           </button>
         </div>
       </div>
