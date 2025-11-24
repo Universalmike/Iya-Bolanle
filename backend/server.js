@@ -4,92 +4,76 @@ import sqlite3 from "sqlite3";
 import bcrypt from "bcryptjs";
 
 const app = express();
-const PORT = process.env.PORT || 5000;
-
 app.use(cors());
 app.use(express.json());
 
-// --------- SQLite setup ---------
-const db = new sqlite3.Database("./db.sqlite", (err) => {
-  if (err) console.error("DB connection error:", err);
-  else console.log("Connected to SQLite DB");
-});
+const db = new sqlite3.Database("./data.db");
 
-db.run(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT,
-    balance INTEGER DEFAULT 10000
-  )
-`);
+// Create users table if it doesn't exist
+db.run(`CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT UNIQUE,
+  password TEXT,
+  balance INTEGER DEFAULT 10000
+)`);
 
-// --------- Signup ---------
-app.post("/signup", async (req, res) => {
+const parseIntent = (text) => {
+  text = text.toLowerCase();
+  if (text.includes("balance")) return "check_balance";
+  if (text.includes("airtime") || text.includes("top up")) return "buy_airtime";
+  if (text.includes("transfer") || text.includes("send")) return "transfer";
+  return "unknown";
+};
+
+// --------- Auth ----------
+app.post("/signup", (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ message: "Enter all fields" });
-
-  const hashed = await bcrypt.hash(password, 10);
-  db.run("INSERT INTO users (username, password) VALUES (?, ?)", [username, hashed], function(err) {
-    if (err) return res.status(400).json({ message: "Username already exists" });
-    return res.json({ message: "Signup successful" });
+  const hashed = bcrypt.hashSync(password, 10);
+  db.run("INSERT INTO users(username, password) VALUES(?, ?)", [username, hashed], function(err) {
+    if (err) return res.status(400).json({ message: "Signup failed: username exists" });
+    res.json({ message: "Signup successful" });
   });
 });
 
-// --------- Login ---------
-app.post("/login", async (req, res) => {
+app.post("/login", (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ message: "Enter all fields" });
-
-  db.get("SELECT * FROM users WHERE username = ?", [username], async (err, user) => {
-    if (err || !user) return res.status(400).json({ message: "Invalid username or password" });
-
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(400).json({ message: "Invalid username or password" });
-
-    return res.json({ message: "Login successful", balance: user.balance });
-  });
-});
-
-// --------- Check balance ---------
-app.get("/balance", (req, res) => {
-  const username = req.query.username;
-  if (!username) return res.status(400).json({ message: "Username required" });
-
-  db.get("SELECT balance FROM users WHERE username = ?", [username], (err, row) => {
-    if (err || !row) return res.status(400).json({ message: "User not found" });
+  db.get("SELECT * FROM users WHERE username=?", [username], (err, row) => {
+    if (err || !row) return res.status(400).json({ message: "Login failed" });
+    if (!bcrypt.compareSync(password, row.password)) return res.status(400).json({ message: "Login failed" });
     res.json({ balance: row.balance });
   });
 });
 
-// --------- Transfer ---------
-app.post("/transfer", (req, res) => {
-  const { from, to, amount } = req.body;
-  if (!from || !to || !amount) return res.status(400).json({ message: "Missing parameters" });
+// --------- Action ----------
+app.post("/action", (req, res) => {
+  const { username, text } = req.body;
+  if (!username || !text) return res.status(400).json({ message: "Missing username or text" });
 
-  db.get("SELECT balance FROM users WHERE username = ?", [from], (err, row) => {
-    if (err || !row) return res.status(400).json({ message: "Sender not found" });
-    if (row.balance < amount) return res.status(400).json({ message: "Insufficient funds" });
+  db.get("SELECT * FROM users WHERE username=?", [username], (err, user) => {
+    if (err || !user) return res.status(400).json({ message: "User not found" });
 
-    db.run("UPDATE users SET balance = balance - ? WHERE username = ?", [amount, from]);
-    db.run("UPDATE users SET balance = balance + ? WHERE username = ?", [amount, to]);
-    res.json({ message: `Transferred ${amount} from ${from} to ${to}` });
+    const intent = parseIntent(text);
+
+    if (intent === "check_balance") {
+      return res.json({ balance: user.balance });
+    }
+
+    if (intent === "buy_airtime") {
+      const match = text.match(/\d+/);
+      const amount = match ? parseInt(match[0]) : 0;
+      if (amount <= 0) return res.status(400).json({ message: "Invalid airtime amount" });
+      if (user.balance < amount) return res.status(400).json({ message: "Insufficient funds" });
+      const newBal = user.balance - amount;
+      db.run("UPDATE users SET balance=? WHERE username=?", [newBal, username]);
+      return res.json({ message: `Purchased ₦${amount} airtime`, balance: newBal });
+    }
+
+    if (intent === "transfer") {
+      return res.json({ message: "Transfer feature coming soon" });
+    }
+
+    return res.json({ message: "Sorry, I didn't understand that" });
   });
 });
 
-// --------- Buy airtime ---------
-app.post("/buy_airtime", (req, res) => {
-  const { username, amount } = req.body;
-  if (!username || !amount) return res.status(400).json({ message: "Missing parameters" });
-
-  db.get("SELECT balance FROM users WHERE username = ?", [username], (err, row) => {
-    if (err || !row) return res.status(400).json({ message: "User not found" });
-    if (row.balance < amount) return res.status(400).json({ message: "Insufficient funds" });
-
-    db.run("UPDATE users SET balance = balance - ? WHERE username = ?", [amount, username]);
-    res.json({ message: `Purchased airtime of ${amount}` });
-  });
-});
-
-
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(process.env.PORT || 5000, () => console.log("Server running"));
