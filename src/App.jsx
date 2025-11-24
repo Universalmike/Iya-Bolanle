@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+const [password, setPassword] = useState("");
+
 
 /**
  * IMPORTANT:
@@ -194,35 +196,58 @@ export default function App() {
   }, []);
 
   // ------------------------- User management -------------------------
-  const ensureUserExists = (name) => {
-    const clean = name.trim().toLowerCase();
-    const existing = users[clean];
-    if (!existing) {
-      const newUsers = {
-        ...users,
-        [clean]: { balance: 10000, transactions: [] },
-      };
-      setUsers(newUsers);
-      saveAllUsers(newUsers);
-      return newUsers[clean];
+  const handleSignup = async () => {
+  if (!username || !password) return alert("Enter all fields");
+
+  const res = await fetch("http://localhost:5000/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+
+  const data = await res.json();
+
+  if (res.ok) {
+    alert("Signup successful! You can now log in.");
+  } else {
+    alert(data.message);
+  }
+};
+
+const handleLogin = async () => {
+  if (!username || !password) return alert("Enter all fields");
+
+  const res = await fetch("http://localhost:5000/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    alert(data.message);
+    return;
+  }
+
+  // Replace localStorage-based user loading
+  const clean = username.trim().toLowerCase();
+
+  setUsers({
+    [clean]: {
+      balance: data.balance,
+      transactions: []
     }
-    return existing;
-  };
+  });
 
-  const handleLogin = () => {
-    if (!username.trim()) return alert("Enter a username to continue");
-    const clean = username.trim().toLowerCase();
-    ensureUserExists(clean);
-    setIsLoggedIn(true);
-    setMessages([{ role: "assistant", text: `👋 Welcome ${clean}. How can I help you today?`, lang: "english" }]);
-    speakText(`Welcome ${clean}. How can I help you today?`, "english");
-  };
+  setIsLoggedIn(true);
+  setMessages([
+    { role: "assistant", text: `👋 Welcome ${clean}. How can I assist you today?`, lang: "english" }
+  ]);
 
-  const saveUserUpdates = (userKey, updates) => {
-    const fresh = { ...users, [userKey]: { ...users[userKey], ...updates } };
-    setUsers(fresh);
-    saveAllUsers(fresh);
-  };
+  speakText(`Welcome ${clean}. How can I help you today?`, "english");
+};
+
 
   // ------------------------- Transaction Actions -------------------------
   const runSimulatedAction = (userKey, parsedIntent, userLang = "english") => {
@@ -443,85 +468,33 @@ Assistant (${userLang}):`;
   }, [messages, isThinking]);
 
   // ------------------------- Render -------------------------
-  if (!isLoggedIn) {
-    return (
-      <div style={styles.container}>
-        <div style={styles.card}>
-          <h2 style={styles.title}>💸 SARA — Personal Financial Assistant</h2>
-          <input
-            placeholder="Enter username (e.g. michael)"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            style={styles.input}
-          />
-          <button onClick={handleLogin} style={styles.buttonPrimary}>Continue</button>
-          <p style={{ marginTop: 12, color: "#cfcfcf" }}>
-            Data is stored locally in your browser. Each username has private balance & history.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  const userKey = username.trim().toLowerCase();
-  const userData = users[userKey] || { balance: 0, transactions: [] };
-
+if (!isLoggedIn) {
   return (
     <div style={styles.container}>
-      <div style={{ ...styles.card, width: 820, maxWidth: "95%" }}>
-        <div style={styles.header}>
-          <div>
-            <h2 style={{ margin: 0 }}>💬 Owo — Multilingual Financial Assistant</h2>
-            <div style={{ fontSize: 13, color: "#cfcfcf" }}>Logged in as <b>{userKey}</b> • ₦{userData.balance}</div>
-          </div>
-          <div>
-            <button style={styles.smallButton} onClick={() => { navigator.clipboard?.writeText(window.location.href); }}>Copy Link</button>
-          </div>
-        </div>
+      <div style={styles.card}>
+        <h2 style={styles.title}>💸 SARA — Personal Financial Assistant</h2>
+        
+        <input
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={styles.input}
+        />
 
-        <div style={styles.chatWindow}>
-          {messages.map((m, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 8 }}>
-              <div style={{ ...styles.bubble, background: m.role === "user" ? "#6b21a8" : "#1f2937", color: "#fff", maxWidth: "78%" }}>
-                <div style={{ fontSize: 13, opacity: 0.9 }}>{m.text}</div>
-              </div>
-            </div>
-          ))}
-          <div ref={lastMsgsRef} />
-        </div>
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          style={styles.input}
+        />
 
-        <div style={styles.controls}>
-          <button
-            title={isListening ? "Listening..." : "Start voice input"}
-            onClick={() => (isListening ? stopListening() : startListening())}
-            style={{ ...styles.micButton, background: isListening ? "#ef4444" : "#111827" }}
-          >
-            {isListening ? "● Listening" : "🎤 Speak"}
-          </button>
+        <button onClick={handleSignup} style={styles.buttonPrimary}>Sign Up</button>
+        <button onClick={handleLogin} style={styles.buttonPrimary}>Login</button>
 
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your message here (e.g. Abeg send 2000 to Tunde)"
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
-            style={styles.chatInput}
-            disabled={isThinking}
-          />
-
-          <button onClick={() => handleSend()} style={styles.buttonPrimary} disabled={isThinking}>
-            {isThinking ? "Thinking..." : "Send"}
-          </button>
-        </div>
-
-        <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          <div style={{ fontSize: 12, color: "#cfcfcf", width: "100%", marginBottom: 4 }}>Quick examples:</div>
-          <button style={styles.tag} onClick={() => { setInput("Check my balance"); setTimeout(() => handleSend(), 50); }}>Check balance</button>
-          <button style={styles.tag} onClick={() => { setInput("Abeg check my balance"); setTimeout(() => handleSend(), 50); }}>Abeg check my balance (Pidgin)</button>
-          <button style={styles.tag} onClick={() => { setInput("Abeg send 2000 to Tunde"); setTimeout(() => handleSend(), 50); }}>Abeg send 2000 (Pidgin)</button>
-          <button style={styles.tag} onClick={() => { setInput("Ṣe àyẹ̀wò owó mi"); setTimeout(() => handleSend(), 50); }}>Ṣe àyẹ̀wò owó (Yoruba)</button>
-          <button style={styles.tag} onClick={() => { setInput("Biko lelee ego m"); setTimeout(() => handleSend(), 50); }}>Biko lelee ego (Igbo)</button>
-          <button style={styles.tag} onClick={() => { setInput("Help me buy 100 airtime"); setTimeout(() => handleSend(), 50); }}>Buy airtime 100</button>
-        </div>
+        <p style={{ marginTop: 12, color: "#cfcfcf" }}>
+          Your account is securely stored using SQLite database.
+        </p>
       </div>
     </div>
   );
