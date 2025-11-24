@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
-import axios from "axios";
 
 // ------------------------- Backend URL -------------------------
 const API_URL = "https://Iya-Bolanle-backend.onrender.com";
@@ -23,7 +22,15 @@ export default function App() {
   // ------------------------- TTS -------------------------
   const speakText = (text) => {
     if (!("speechSynthesis" in window)) return;
-    const utter = new SpeechSynthesisUtterance(text);
+    
+    // Remove emojis and special characters for speech
+    const cleanText = text
+      .replace(/[😀-🙏🌀-🗿🚀-🛿]/g, '') // Remove emojis
+      .replace(/₦/g, 'Naira ') // Replace Naira symbol with word
+      .replace(/💰|💸|📱|📊|💳|🔒/g, '') // Remove common emojis
+      .trim();
+    
+    const utter = new SpeechSynthesisUtterance(cleanText);
     utter.rate = 1.1;
     utter.pitch = 1.0;
     window.speechSynthesis.cancel();
@@ -34,23 +41,39 @@ export default function App() {
   const handleSignup = async () => {
     if (!username || !password) return alert("Please enter both username and password");
     try {
-      const res = await axios.post(`${API_URL}/signup`, { username, password });
-      alert(res.data.message);
+      const res = await fetch(`${API_URL}/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      alert(data.message);
     } catch (err) {
-      alert(err.response?.data?.message || "Signup failed");
+      alert("Signup failed. Please try again.");
     }
   };
 
   const handleLogin = async () => {
     if (!username || !password) return alert("Please enter both username and password");
     try {
-      const res = await axios.post(`${API_URL}/login`, { username, password });
+      const res = await fetch(`${API_URL}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      
+      if (!res.ok) {
+        alert(data.message || "Login failed");
+        return;
+      }
+      
       setIsLoggedIn(true);
       const welcomeMsg = `Hi ${username}! I'm SARA, your personal financial assistant. I'm here to help you manage your money. You can ask me to check your balance, buy airtime, transfer funds, or view your transaction history. What would you like to do?`;
       setMessages([{ role: "assistant", text: welcomeMsg }]);
-      speakText(`Welcome back ${username}! How can I help you today?`);
+      speakText(`Welcome back ${username}! I'm SARA, your personal financial assistant. How can I help you today?`);
     } catch (err) {
-      alert(err.response?.data?.message || "Login failed");
+      alert("Login failed. Please check your connection.");
     }
   };
 
@@ -58,9 +81,10 @@ export default function App() {
   const fetchHistory = async () => {
     setIsThinking(true);
     try {
-      const res = await axios.get(`${API_URL}/history/${username}`);
+      const res = await fetch(`${API_URL}/history/${username}`);
+      const data = await res.json();
       
-      if (!res.data.transactions || res.data.transactions.length === 0) {
+      if (!data.transactions || data.transactions.length === 0) {
         setMessages((prev) => [...prev, { 
           role: "assistant", 
           text: "You don't have any transaction history yet. Start by checking your balance or making a transaction!" 
@@ -68,7 +92,7 @@ export default function App() {
         speakText("You have no transactions yet.");
       } else {
         const historyText = "📊 Here's your recent transaction history:\n\n" + 
-          res.data.transactions
+          data.transactions
             .map((t) => {
               const date = new Date(t.date).toLocaleString('en-NG', {
                 month: 'short',
@@ -120,12 +144,21 @@ export default function App() {
     setIsThinking(true);
 
     try {
-      const res = await axios.post(`${API_URL}/action`, { username, text });
-      const reply = res.data.message;
+      const res = await fetch(`${API_URL}/action`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, text })
+      });
+      const data = await res.json();
+      
+      const reply = data.message || "I couldn't process that request.";
       setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
-      speakText(reply);
+      
+      // Use the speak version if available, otherwise clean the message
+      const speechText = data.speak || reply;
+      speakText(speechText);
     } catch (err) {
-      const errorMsg = err.response?.data?.message || "Sorry, something went wrong. Please try again.";
+      const errorMsg = "Sorry, something went wrong. Please try again.";
       setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
       speakText(errorMsg);
     } finally {
@@ -252,10 +285,7 @@ export default function App() {
           ))}
           {isThinking && (
             <div style={{ ...styles.bubble, background: "#4b5563" }}>
-              <span style={styles.typingDots}>SARA is thinking</span>
-              <span style={styles.dot}>.</span>
-              <span style={styles.dot}>.</span>
-              <span style={styles.dot}>.</span>
+              SARA is thinking...
             </div>
           )}
           <div ref={chatEndRef} />
@@ -467,12 +497,4 @@ const styles = {
     color: "#64748b",
     textAlign: "center",
   },
-  typingDots: {
-    display: "inline-block",
-  },
-  dot: {
-    animation: "blink 1.4s infinite",
-    fontSize: 20,
-  },
 };
-
