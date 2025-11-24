@@ -114,6 +114,14 @@ app.post("/action", (req, res) => {
 
       return;
     }
+app.get("/history/:username", (req, res) => {
+  const { username } = req.params;
+  db.all("SELECT * FROM transactions WHERE username=? ORDER BY date DESC LIMIT 10", [username], (err, rows) => {
+    if (err) return res.status(500).json({ message: "Could not fetch history" });
+    return res.json({ transactions: rows });
+  });
+});
+
 
     // ------------------------- Unknown action -------------------------
     return res.json({ message: "Action not recognized." });
