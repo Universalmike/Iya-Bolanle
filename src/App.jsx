@@ -36,10 +36,10 @@ const detectLanguage = (text = "") => {
   const s = text.toLowerCase();
 
   // Enhanced Pidgin detection (more keywords)
-  if (/\b(abeg|wey|una|omo|i go|na so|wetin|dey|make|e be like|sef|o|shey|dem)\b/.test(s)) return "pidgin";
+  if (/\b(abeg|wey|una|omo|i go|na so|wetin|dey|make|e be like|sef|o|shey|dem|una)\b/.test(s)) return "pidgin";
 
   // Enhanced Yoruba detection (more diacritics and common words)
-  if (/[ṣọẹ́àèìòù]/i.test(s) || /\b(mi|ni|ti|kin|se|owo|je|lo|wa|ba|gba|fun|lati|nigba|abi)\b/.test(s)) return "yoruba";
+  if (/[ṣọẹ́àèìòù]/i.test(s) || /\b(mi|ni|bami|ra|ti|kin|se|owo|je|lo|wa|ba|gba|fun|lati|nigba|abi)\b/.test(s)) return "yoruba";
 
   // Enhanced Igbo detection
   if (/\b(biko|nna|nne|ego|kedu|ime|onye|na|nwa|ya|ka|di|gi|anyi|obi)\b/.test(s) || /[ịọụ]/i.test(s)) return "igbo";
@@ -190,7 +190,7 @@ export default function App() {
 
   useEffect(() => {
     ensureVoicesLoaded();
-    speakText("Owo ready. Please login to continue.", "english");
+    speakText("SARA ready. Please login to continue.", "english");
   }, []);
 
   // ------------------------- User management -------------------------
@@ -447,7 +447,7 @@ Assistant (${userLang}):`;
     return (
       <div style={styles.container}>
         <div style={styles.card}>
-          <h2 style={styles.title}>💸 Owo — Personal Financial Assistant</h2>
+          <h2 style={styles.title}>💸 SARA — Personal Financial Assistant</h2>
           <input
             placeholder="Enter username (e.g. michael)"
             value={username}
