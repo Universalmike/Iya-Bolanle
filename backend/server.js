@@ -66,7 +66,8 @@ app.post("/action", (req, res) => {
     if (/\b(balance|how much|my balance)\b/.test(lowerText)) {
       return res.json({ 
         message: `Hey ${username}! Your current balance is ₦${user.balance.toLocaleString()}. Need anything else?`, 
-        balance: user.balance 
+        balance: user.balance,
+        speak: `Hey ${username}! Your current balance is ${user.balance.toLocaleString()} Naira. Need anything else?`
       });
     }
 
