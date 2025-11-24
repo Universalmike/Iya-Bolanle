@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef, useCallback } from "react";
 import axios from "axios";
 
 // ------------------------- Backend URL -------------------------
-const API_URL = "https://Iya-Bolanle-backend.onrender.com"; // <-- replace with your deployed backend URL
+const API_URL = "https://Iya-Bolanle-backend.onrender.com";
 
 export default function App() {
   const [username, setUsername] = useState("");
@@ -11,11 +11,10 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
-
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
 
-  // ------------------------- TTS helpers -------------------------
+  // ------------------------- TTS -------------------------
   const speakText = (text) => {
     if (!("speechSynthesis" in window)) return;
     const utter = new SpeechSynthesisUtterance(text);
@@ -26,7 +25,6 @@ export default function App() {
   // ------------------------- Auth -------------------------
   const handleSignup = async () => {
     if (!username || !password) return alert("Enter all fields");
-
     try {
       const res = await axios.post(`${API_URL}/signup`, { username, password });
       alert(res.data.message);
@@ -37,20 +35,36 @@ export default function App() {
 
   const handleLogin = async () => {
     if (!username || !password) return alert("Enter all fields");
-
     try {
       const res = await axios.post(`${API_URL}/login`, { username, password });
       setIsLoggedIn(true);
-      setMessages([
-        { role: "assistant", text: `👋 Welcome ${username}. How can I assist you today?` },
-      ]);
+      setMessages([{ role: "assistant", text: `Welcome ${username}. How can I assist you today?` }]);
       speakText(`Welcome ${username}. How can I assist you today?`);
     } catch (err) {
       alert(err.response?.data?.message || "Login failed");
     }
   };
 
-  // ------------------------- Transaction / action -------------------------
+  // ------------------------- Fetch History -------------------------
+  const fetchHistory = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/history/${username}`);
+      const historyText = res.data.transactions
+        .map(
+          (t) =>
+            `${new Date(t.date).toLocaleString()} — ${t.type} ₦${t.amount}${
+              t.to_user ? " → " + t.to_user : ""
+            }`
+        )
+        .join("\n");
+      setMessages((prev) => [...prev, { role: "assistant", text: historyText || "No transactions yet." }]);
+      speakText("Transaction history fetched.");
+    } catch {
+      setMessages((prev) => [...prev, { role: "assistant", text: "Could not fetch history." }]);
+    }
+  };
+
+  // ------------------------- Send Action -------------------------
   const handleSend = async (explicitText) => {
     const text = explicitText ?? input;
     if (!text.trim()) return;
@@ -65,7 +79,7 @@ export default function App() {
 
     try {
       const res = await axios.post(`${API_URL}/action`, { username, text });
-      const reply = res.data.balance !== undefined ? `💰 Your balance: ₦${res.data.balance}` : res.data.message;
+      const reply = res.data.balance !== undefined ? `Your balance: ₦${res.data.balance}` : res.data.message;
       setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
       speakText(reply);
     } catch (err) {
@@ -103,7 +117,9 @@ export default function App() {
   }, []);
 
   const stopListening = () => {
-    try { recognitionRef.current?.stop(); } catch (e) {}
+    try {
+      recognitionRef.current?.stop();
+    } catch {}
     setIsListening(false);
   };
 
@@ -126,11 +142,13 @@ export default function App() {
             onChange={(e) => setPassword(e.target.value)}
             style={styles.input}
           />
-          <button onClick={handleSignup} style={styles.buttonPrimary}>Sign Up</button>
-          <button onClick={handleLogin} style={styles.buttonPrimary}>Login</button>
-          <p style={{ marginTop: 12, color: "#cfcfcf" }}>
-            Log In now. No account? Sign up
-          </p>
+          <button onClick={handleSignup} style={styles.buttonPrimary}>
+            Sign Up
+          </button>
+          <button onClick={handleLogin} style={styles.buttonPrimary}>
+            Login
+          </button>
+          <p style={{ marginTop: 12, color: "#cfcfcf" }}>Your account is securely stored using SQLite.</p>
         </div>
       </div>
     );
@@ -141,12 +159,34 @@ export default function App() {
       <div style={styles.card}>
         <div style={styles.chatWindow}>
           {messages.map((m, idx) => (
-            <div key={idx} style={{ ...styles.bubble, background: m.role === "user" ? "#1f2937" : "#4b5563" }}>
+            <div
+              key={idx}
+              style={{
+                ...styles.bubble,
+                background: m.role === "user" ? "#1f2937" : "#4b5563",
+              }}
+            >
               {m.text}
             </div>
           ))}
           {isThinking && <div style={styles.bubble}>SARA is thinking...</div>}
         </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <button onClick={() => handleSend("check balance")} style={styles.buttonPrimary}>
+            Check Balance
+          </button>
+          <button onClick={() => handleSend("buy 100 airtime")} style={styles.buttonPrimary}>
+            Buy Airtime
+          </button>
+          <button onClick={() => handleSend("transfer 1000 to friend")} style={styles.buttonPrimary}>
+            Transfer
+          </button>
+          <button onClick={fetchHistory} style={styles.buttonPrimary}>
+            Show History
+          </button>
+        </div>
+
         <div style={styles.controls}>
           <input
             value={input}
@@ -155,24 +195,11 @@ export default function App() {
             style={styles.chatInput}
             onKeyDown={(e) => e.key === "Enter" && handleSend()}
           />
-          <button onClick={() => handleSend()} style={styles.buttonPrimary}>Send</button>
+          <button onClick={() => handleSend()} style={styles.buttonPrimary}>
+            Send
+          </button>
           <button onClick={isListening ? stopListening : startListening} style={styles.buttonPrimary}>
             {isListening ? "Stop" : "🎤"}
-          </button>
-          <button onClick={async () => {
-              try {
-                const res = await axios.get(`${API_URL}/history/${username}`);
-                const historyText = res.data.transactions.map(
-                  t => `${t.date.split("T")[0]}: ${t.type} ₦${t.amount} ${t.to_user ? "→ " + t.to_user : ""}`
-                ).join("\n");
-                setMessages(prev => [...prev, { role: "assistant", text: historyText }]);
-              } catch {
-                setMessages(prev => [...prev, { role: "assistant", text: "Could not fetch history." }]);
-              }
-            }}
-            style={styles.buttonPrimary}
-          >
-            Show History
           </button>
         </div>
       </div>
@@ -216,4 +243,5 @@ const styles = {
   input: { width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.06)", background: "#0b1220", color: "#fff", marginBottom: 12 },
   buttonPrimary: { padding: "10px 14px", borderRadius: 8, border: "none", background: "#7c3aed", color: "#fff", cursor: "pointer" },
 };
+
 
