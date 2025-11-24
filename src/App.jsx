@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
+import axios from "axios";
 
 // ------------------------- Backend URL -------------------------
 const API_URL = "https://Iya-Bolanle-backend.onrender.com";
@@ -25,9 +26,10 @@ export default function App() {
     
     // Remove emojis and special characters for speech
     const cleanText = text
-      .replace(/[😀-🙏🌀-🗿🚀-🛿]/g, '') // Remove emojis
+      .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis (proper unicode range)
+      .replace(/[\u{2600}-\u{26FF}]/gu, '') // Remove misc symbols
+      .replace(/[\u{2700}-\u{27BF}]/gu, '') // Remove dingbats
       .replace(/₦/g, 'Naira ') // Replace Naira symbol with word
-      .replace(/💰|💸|📱|📊|💳|🔒/g, '') // Remove common emojis
       .trim();
     
     const utter = new SpeechSynthesisUtterance(cleanText);
@@ -41,39 +43,23 @@ export default function App() {
   const handleSignup = async () => {
     if (!username || !password) return alert("Please enter both username and password");
     try {
-      const res = await fetch(`${API_URL}/signup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password })
-      });
-      const data = await res.json();
-      alert(data.message);
+      const res = await axios.post(`${API_URL}/signup`, { username, password });
+      alert(res.data.message);
     } catch (err) {
-      alert("Signup failed. Please try again.");
+      alert(err.response?.data?.message || "Signup failed");
     }
   };
 
   const handleLogin = async () => {
     if (!username || !password) return alert("Please enter both username and password");
     try {
-      const res = await fetch(`${API_URL}/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password })
-      });
-      const data = await res.json();
-      
-      if (!res.ok) {
-        alert(data.message || "Login failed");
-        return;
-      }
-      
+      const res = await axios.post(`${API_URL}/login`, { username, password });
       setIsLoggedIn(true);
       const welcomeMsg = `Hi ${username}! I'm SARA, your personal financial assistant. I'm here to help you manage your money. You can ask me to check your balance, buy airtime, transfer funds, or view your transaction history. What would you like to do?`;
       setMessages([{ role: "assistant", text: welcomeMsg }]);
       speakText(`Welcome back ${username}! I'm SARA, your personal financial assistant. How can I help you today?`);
     } catch (err) {
-      alert("Login failed. Please check your connection.");
+      alert(err.response?.data?.message || "Login failed");
     }
   };
 
@@ -81,10 +67,9 @@ export default function App() {
   const fetchHistory = async () => {
     setIsThinking(true);
     try {
-      const res = await fetch(`${API_URL}/history/${username}`);
-      const data = await res.json();
+      const res = await axios.get(`${API_URL}/history/${username}`);
       
-      if (!data.transactions || data.transactions.length === 0) {
+      if (!res.data.transactions || res.data.transactions.length === 0) {
         setMessages((prev) => [...prev, { 
           role: "assistant", 
           text: "You don't have any transaction history yet. Start by checking your balance or making a transaction!" 
@@ -92,7 +77,7 @@ export default function App() {
         speakText("You have no transactions yet.");
       } else {
         const historyText = "📊 Here's your recent transaction history:\n\n" + 
-          data.transactions
+          res.data.transactions
             .map((t) => {
               const date = new Date(t.date).toLocaleString('en-NG', {
                 month: 'short',
@@ -144,21 +129,15 @@ export default function App() {
     setIsThinking(true);
 
     try {
-      const res = await fetch(`${API_URL}/action`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, text })
-      });
-      const data = await res.json();
-      
-      const reply = data.message || "I couldn't process that request.";
+      const res = await axios.post(`${API_URL}/action`, { username, text });
+      const reply = res.data.message;
       setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
       
       // Use the speak version if available, otherwise clean the message
-      const speechText = data.speak || reply;
+      const speechText = res.data.speak || reply;
       speakText(speechText);
     } catch (err) {
-      const errorMsg = "Sorry, something went wrong. Please try again.";
+      const errorMsg = err.response?.data?.message || "Sorry, something went wrong. Please try again.";
       setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
       speakText(errorMsg);
     } finally {
