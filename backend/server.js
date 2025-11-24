@@ -2,6 +2,9 @@ import express from "express";
 import cors from "cors";
 import sqlite3 from "sqlite3";
 import bcrypt from "bcryptjs";
+import cors from "cors";
+app.use(cors());
+
 
 const app = express();
 app.use(cors());
