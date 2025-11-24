@@ -51,9 +51,45 @@ app.post("/login", async (req, res) => {
   });
 });
 
-// --------- Simple transaction route (example) ---------
-app.get("/transactions", (req, res) => {
-  res.json({ message: "This will return transaction history" });
+// --------- Check balance ---------
+app.get("/balance", (req, res) => {
+  const username = req.query.username;
+  if (!username) return res.status(400).json({ message: "Username required" });
+
+  db.get("SELECT balance FROM users WHERE username = ?", [username], (err, row) => {
+    if (err || !row) return res.status(400).json({ message: "User not found" });
+    res.json({ balance: row.balance });
+  });
 });
+
+// --------- Transfer ---------
+app.post("/transfer", (req, res) => {
+  const { from, to, amount } = req.body;
+  if (!from || !to || !amount) return res.status(400).json({ message: "Missing parameters" });
+
+  db.get("SELECT balance FROM users WHERE username = ?", [from], (err, row) => {
+    if (err || !row) return res.status(400).json({ message: "Sender not found" });
+    if (row.balance < amount) return res.status(400).json({ message: "Insufficient funds" });
+
+    db.run("UPDATE users SET balance = balance - ? WHERE username = ?", [amount, from]);
+    db.run("UPDATE users SET balance = balance + ? WHERE username = ?", [amount, to]);
+    res.json({ message: `Transferred ${amount} from ${from} to ${to}` });
+  });
+});
+
+// --------- Buy airtime ---------
+app.post("/buy_airtime", (req, res) => {
+  const { username, amount } = req.body;
+  if (!username || !amount) return res.status(400).json({ message: "Missing parameters" });
+
+  db.get("SELECT balance FROM users WHERE username = ?", [username], (err, row) => {
+    if (err || !row) return res.status(400).json({ message: "User not found" });
+    if (row.balance < amount) return res.status(400).json({ message: "Insufficient funds" });
+
+    db.run("UPDATE users SET balance = balance - ? WHERE username = ?", [amount, username]);
+    res.json({ message: `Purchased airtime of ${amount}` });
+  });
+});
+
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
