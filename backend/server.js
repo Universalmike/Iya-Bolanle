@@ -47,33 +47,76 @@ app.post("/login", (req, res) => {
 // --------- Action ----------
 app.post("/action", (req, res) => {
   const { username, text } = req.body;
-  if (!username || !text) return res.status(400).json({ message: "Missing username or text" });
+  if (!username || !text) return res.status(400).json({ message: "Missing parameters" });
 
   db.get("SELECT * FROM users WHERE username=?", [username], (err, user) => {
     if (err || !user) return res.status(400).json({ message: "User not found" });
 
-    const intent = parseIntent(text);
+    const lowerText = text.toLowerCase();
 
-    if (intent === "check_balance") {
-      return res.json({ balance: user.balance });
+    // ------------------------- Check balance -------------------------
+    if (/\b(balance|how much|my balance)\b/.test(lowerText)) {
+      return res.json({ message: `Your balance: ₦${user.balance}`, balance: user.balance });
     }
 
-    if (intent === "buy_airtime") {
-      const match = text.match(/\d+/);
+    // ------------------------- Airtime purchase -------------------------
+    if (/\b(airtime|recharge|top ?up)\b/.test(lowerText)) {
+      const match = lowerText.match(/(\d+)/);
       const amount = match ? parseInt(match[0]) : 0;
-      if (amount <= 0) return res.status(400).json({ message: "Invalid airtime amount" });
+      if (!amount || amount <= 0) return res.status(400).json({ message: "Invalid airtime amount" });
       if (user.balance < amount) return res.status(400).json({ message: "Insufficient funds" });
+
       const newBal = user.balance - amount;
       db.run("UPDATE users SET balance=? WHERE username=?", [newBal, username]);
-      return res.json({ message: `Purchased ₦${amount} airtime`, balance: newBal });
+
+      db.run(
+        "INSERT INTO transactions (username,type,amount,to_user,date) VALUES (?,?,?,?,?)",
+        [username, "Airtime", amount, "Self", new Date().toISOString()]
+      );
+
+      return res.json({ message: `Bought ₦${amount} airtime. New balance: ₦${newBal}`, balance: newBal });
     }
 
-    if (intent === "transfer") {
-      return res.json({ message: "Transfer feature coming soon" });
+    // ------------------------- Transfer -------------------------
+    if (/transfer/.test(lowerText)) {
+      const match = lowerText.match(/(\d+)/);
+      const amount = match ? parseInt(match[0]) : 0;
+      const recipientMatch = lowerText.match(/to (\w+)/);
+      const recipient = recipientMatch ? recipientMatch[1] : null;
+
+      if (!recipient) return res.status(400).json({ message: "Specify recipient" });
+      if (amount <= 0) return res.status(400).json({ message: "Invalid transfer amount" });
+      if (user.balance < amount) return res.status(400).json({ message: "Insufficient funds" });
+
+      db.get("SELECT * FROM users WHERE username=?", [recipient], (err2, recUser) => {
+        if (err2 || !recUser) return res.status(400).json({ message: "Recipient not found" });
+
+        const newSenderBal = user.balance - amount;
+        const newRecipientBal = recUser.balance + amount;
+
+        db.run("UPDATE users SET balance=? WHERE username=?", [newSenderBal, username]);
+        db.run("UPDATE users SET balance=? WHERE username=?", [newRecipientBal, recipient]);
+
+        // Record transaction for both users
+        db.run("INSERT INTO transactions (username,type,amount,to_user,date) VALUES (?,?,?,?,?)",
+          [username, "Transfer", amount, recipient, new Date().toISOString()]
+        );
+
+        db.run("INSERT INTO transactions (username,type,amount,to_user,date) VALUES (?,?,?,?,?)",
+          [recipient, "Received", amount, username, new Date().toISOString()]
+        );
+
+        return res.json({
+          message: `Transferred ₦${amount} to ${recipient}. New balance: ₦${newSenderBal}`,
+          balance: newSenderBal
+        });
+      });
+
+      return;
     }
 
-    return res.json({ message: "Sorry, I didn't understand that" });
+    // ------------------------- Unknown action -------------------------
+    return res.json({ message: "Action not recognized." });
   });
 });
 
-app.listen(process.env.PORT || 5000, () => console.log("Server running"));
