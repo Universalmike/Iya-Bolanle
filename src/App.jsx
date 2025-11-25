@@ -14,6 +14,9 @@ export default function App() {
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const chatEndRef = useRef(null);
+  const [showEsusu, setShowEsusu] = useState(false);
+  const [esusuGroups, setEsusuGroups] = useState([]);
+  const [selectedGroup, setSelectedGroup] = useState(null);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -62,6 +65,67 @@ export default function App() {
       alert(err.response?.data?.message || "Login failed");
     }
   };
+
+  // ------------------------- Esusu Functions -------------------------
+  const fetchEsusuGroups = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/esusu/my-groups/${username}`);
+      setEsusuGroups(res.data.groups || []);
+    } catch (err) {
+      console.error("Could not fetch esusu groups");
+    }
+  };
+
+  const createEsusuGroup = async (groupName, amount, frequency, members) => {
+    try {
+      const res = await axios.post(`${API_URL}/esusu/create`, {
+        username,
+        groupName,
+        amountPerPerson: parseInt(amount),
+        frequency,
+        totalMembers: parseInt(members)
+      });
+      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
+      speakText(res.data.speak || res.data.message);
+      fetchEsusuGroups();
+    } catch (err) {
+      const errorMsg = err.response?.data?.message || "Could not create group";
+      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
+      speakText(errorMsg);
+    }
+  };
+
+  const joinEsusuGroup = async (groupName) => {
+    try {
+      const res = await axios.post(`${API_URL}/esusu/join`, { username, groupName });
+      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
+      speakText(res.data.speak || res.data.message);
+      fetchEsusuGroups();
+    } catch (err) {
+      const errorMsg = err.response?.data?.message || "Could not join group";
+      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
+      speakText(errorMsg);
+    }
+  };
+
+  const contributeToEsusu = async (groupName) => {
+    try {
+      const res = await axios.post(`${API_URL}/esusu/contribute`, { username, groupName });
+      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
+      speakText(res.data.speak || res.data.message);
+      fetchEsusuGroups();
+    } catch (err) {
+      const errorMsg = err.response?.data?.message || "Could not contribute";
+      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
+      speakText(errorMsg);
+    }
+  };
+
+  useEffect(() => {
+    if (isLoggedIn) {
+      fetchEsusuGroups();
+    }
+  }, [isLoggedIn]);
 
   // ------------------------- Fetch History -------------------------
   const fetchHistory = async () => {
@@ -235,20 +299,42 @@ export default function App() {
       <div style={styles.card}>
         <div style={styles.header}>
           <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
-          <button 
-            onClick={() => {
-              setIsLoggedIn(false);
-              setMessages([]);
-              setUsername("");
-              setPassword("");
-            }} 
-            style={styles.logoutButton}
-          >
-            Logout
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button 
+              onClick={() => setShowEsusu(!showEsusu)} 
+              style={{
+                ...styles.esusuButton,
+                background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
+              }}
+            >
+              {showEsusu ? "💬 Chat" : "🤝 Esusu"}
+            </button>
+            <button 
+              onClick={() => {
+                setIsLoggedIn(false);
+                setMessages([]);
+                setUsername("");
+                setPassword("");
+                setShowEsusu(false);
+              }} 
+              style={styles.logoutButton}
+            >
+              Logout
+            </button>
+          </div>
         </div>
 
-        <div style={styles.chatWindow}>
+        {showEsusu ? (
+          <EsusuView 
+            groups={esusuGroups}
+            onCreateGroup={createEsusuGroup}
+            onJoinGroup={joinEsusuGroup}
+            onContribute={contributeToEsusu}
+            username={username}
+          />
+        ) : (
+          <>
+            <div style={styles.chatWindow}>
           {messages.map((m, idx) => (
             <div
               key={idx}
@@ -475,5 +561,79 @@ const styles = {
     fontSize: 13,
     color: "#64748b",
     textAlign: "center",
+  },
+  esusuButton: {
+    padding: "8px 16px",
+    borderRadius: 8,
+    border: "1px solid rgba(124,58,237,0.3)",
+    color: "#a78bfa",
+    cursor: "pointer",
+    fontSize: 14,
+    fontWeight: 500,
+  },
+  esusuContainer: {
+    padding: 16,
+    minHeight: "60vh",
+  },
+  esusuTitle: {
+    margin: "0 0 8px 0",
+    fontSize: 24,
+    fontWeight: 700,
+  },
+  esusuSubtitle: {
+    margin: "0 0 24px 0",
+    fontSize: 14,
+    color: "#94a3b8",
+  },
+  backButton: {
+    padding: "8px 16px",
+    marginBottom: 20,
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.08)",
+    background: "transparent",
+    color: "#a78bfa",
+    cursor: "pointer",
+    fontSize: 14,
+  },
+  infoBox: {
+    padding: 16,
+    borderRadius: 10,
+    background: "rgba(124,58,237,0.05)",
+    border: "1px solid rgba(124,58,237,0.2)",
+    marginTop: 16,
+    marginBottom: 16,
+  },
+  groupsList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+    marginBottom: 20,
+  },
+  groupCard: {
+    padding: 16,
+    borderRadius: 12,
+    background: "#081127",
+    border: "1px solid rgba(255,255,255,0.05)",
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+  contributeButton: {
+    padding: "10px 16px",
+    borderRadius: 8,
+    border: "none",
+    background: "#10b981",
+    color: "#fff",
+    cursor: "pointer",
+    fontSize: 13,
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+  },
+  emptyState: {
+    textAlign: "center",
+    padding: "40px 20px",
+    background: "#081127",
+    borderRadius: 12,
+    marginBottom: 20,
   },
 };
