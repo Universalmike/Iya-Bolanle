@@ -639,3 +639,5 @@ const styles = {
     marginBottom: 20,
   },
 };
+
+export default App;
