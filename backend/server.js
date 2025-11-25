@@ -27,6 +27,40 @@ db.run(`CREATE TABLE IF NOT EXISTS transactions (
   date TEXT
 )`);
 
+// Create esusu groups table
+db.run(`CREATE TABLE IF NOT EXISTS esusu_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_name TEXT UNIQUE,
+  amount_per_person INTEGER,
+  frequency TEXT,
+  total_members INTEGER,
+  created_by TEXT,
+  status TEXT DEFAULT 'active',
+  created_at TEXT
+)`);
+
+// Create esusu members table
+db.run(`CREATE TABLE IF NOT EXISTS esusu_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER,
+  username TEXT,
+  position INTEGER,
+  has_collected INTEGER DEFAULT 0,
+  joined_at TEXT,
+  FOREIGN KEY(group_id) REFERENCES esusu_groups(id)
+)`);
+
+// Create esusu contributions table
+db.run(`CREATE TABLE IF NOT EXISTS esusu_contributions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER,
+  username TEXT,
+  amount INTEGER,
+  cycle_number INTEGER,
+  contributed_at TEXT,
+  FOREIGN KEY(group_id) REFERENCES esusu_groups(id)
+)`);
+
 // --------- Auth ----------
 app.post("/signup", (req, res) => {
   const { username, password } = req.body;
@@ -103,8 +137,9 @@ app.post("/action", (req, res) => {
         );
 
         return res.json({ 
-          message: `Perfect! I've topped up ₦${amount.toLocaleString()} airtime for you. Your new balance is ₦${newBal.toLocaleString()}. Enjoy! 📱`, 
-          balance: newBal 
+          message: `Perfect! I've topped up ₦${amount.toLocaleString()} airtime for you. Your new balance is ₦${newBal.toLocaleString()}. Enjoy!`, 
+          balance: newBal,
+          speak: `Perfect! I've topped up ${amount.toLocaleString()} Naira airtime for you. Your new balance is ${newBal.toLocaleString()} Naira. Enjoy!`
         });
       });
       return;
@@ -170,13 +205,31 @@ app.post("/action", (req, res) => {
             );
 
             return res.json({
-              message: `All done! ₦${amount.toLocaleString()} has been sent to ${recipient}. Your new balance is ₦${newSenderBal.toLocaleString()}. 💸`,
-              balance: newSenderBal
+              message: `All done! ₦${amount.toLocaleString()} has been sent to ${recipient}. Your new balance is ₦${newSenderBal.toLocaleString()}.`,
+              balance: newSenderBal,
+              speak: `All done! ${amount.toLocaleString()} Naira has been sent to ${recipient}. Your new balance is ${newSenderBal.toLocaleString()} Naira.`
             });
           });
         });
       });
       return;
+    }
+
+    // ------------------------- Esusu/Ajo Commands -------------------------
+    if (/\b(esusu|ajo|thrift|group saving)\b/.test(lowerText)) {
+      // Create esusu group
+      if (/\b(create|start|form)\b/.test(lowerText)) {
+        return res.json({ 
+          message: "To create an esusu group, say something like: 'create esusu group FamilySavings for 5000 monthly with 6 members'",
+          speak: "To create an esusu group, say something like: create esusu group Family Savings for 5000 monthly with 6 members"
+        });
+      }
+      
+      // General esusu info
+      return res.json({ 
+        message: "Esusu (also called Ajo) lets you save with friends! Everyone contributes regularly, and each person takes turns collecting the full amount. Want to create a group or join one?",
+        speak: "Esusu, also called Ajo, lets you save with friends! Everyone contributes regularly, and each person takes turns collecting the full amount. Want to create a group or join one?"
+      });
     }
 
     // ------------------------- Unknown action -------------------------
@@ -206,4 +259,205 @@ app.get("/history/:username", (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 SARA backend running on port ${PORT}`);
+});
+
+// --------- Esusu/Ajo Features ----------
+
+// Create a new esusu group
+app.post("/esusu/create", (req, res) => {
+  const { username, groupName, amountPerPerson, frequency, totalMembers } = req.body;
+  
+  if (!username || !groupName || !amountPerPerson || !frequency || !totalMembers) {
+    return res.status(400).json({ message: "All fields are required" });
+  }
+
+  if (totalMembers < 3 || totalMembers > 12) {
+    return res.status(400).json({ 
+      message: "Group must have between 3 and 12 members",
+      speak: "Group must have between 3 and 12 members"
+    });
+  }
+
+  db.run(
+    "INSERT INTO esusu_groups (group_name, amount_per_person, frequency, total_members, created_by, created_at) VALUES (?,?,?,?,?,?)",
+    [groupName, amountPerPerson, frequency, totalMembers, username, new Date().toISOString()],
+    function(err) {
+      if (err) {
+        return res.status(400).json({ 
+          message: "A group with this name already exists. Try a different name!",
+          speak: "A group with this name already exists. Try a different name!"
+        });
+      }
+
+      const groupId = this.lastID;
+      
+      // Add creator as first member
+      db.run(
+        "INSERT INTO esusu_members (group_id, username, position, joined_at) VALUES (?,?,?,?)",
+        [groupId, username, 1, new Date().toISOString()]
+      );
+
+      res.json({ 
+        message: `Great! Your esusu group "${groupName}" has been created. Share the group name with friends to invite them!`,
+        speak: `Great! Your esusu group ${groupName} has been created. Share the group name with friends to invite them!`,
+        groupId: groupId
+      });
+    }
+  );
+});
+
+// Join an existing esusu group
+app.post("/esusu/join", (req, res) => {
+  const { username, groupName } = req.body;
+
+  if (!username || !groupName) {
+    return res.status(400).json({ message: "Username and group name required" });
+  }
+
+  db.get("SELECT * FROM esusu_groups WHERE group_name=?", [groupName], (err, group) => {
+    if (err || !group) {
+      return res.status(400).json({ 
+        message: `I couldn't find a group named "${groupName}". Check the spelling or ask the creator for the exact name.`,
+        speak: `I couldn't find a group named ${groupName}. Check the spelling or ask the creator for the exact name.`
+      });
+    }
+
+    // Check if user already in group
+    db.get("SELECT * FROM esusu_members WHERE group_id=? AND username=?", [group.id, username], (err2, existing) => {
+      if (existing) {
+        return res.status(400).json({ 
+          message: "You're already a member of this group!",
+          speak: "You're already a member of this group!"
+        });
+      }
+
+      // Check if group is full
+      db.all("SELECT * FROM esusu_members WHERE group_id=?", [group.id], (err3, members) => {
+        if (members.length >= group.total_members) {
+          return res.status(400).json({ 
+            message: "Sorry, this group is full. Try creating a new one!",
+            speak: "Sorry, this group is full. Try creating a new one!"
+          });
+        }
+
+        const position = members.length + 1;
+        
+        db.run(
+          "INSERT INTO esusu_members (group_id, username, position, joined_at) VALUES (?,?,?,?)",
+          [group.id, username, position, new Date().toISOString()],
+          () => {
+            res.json({ 
+              message: `Welcome to "${groupName}"! You're member #${position}. You'll collect when it's your turn in position ${position}.`,
+              speak: `Welcome to ${groupName}! You're member number ${position}. You'll collect when it's your turn in position ${position}.`
+            });
+          }
+        );
+      });
+    });
+  });
+});
+
+// View my esusu groups
+app.get("/esusu/my-groups/:username", (req, res) => {
+  const { username } = req.params;
+
+  db.all(
+    `SELECT g.*, m.position, m.has_collected 
+     FROM esusu_groups g 
+     JOIN esusu_members m ON g.id = m.group_id 
+     WHERE m.username=?`,
+    [username],
+    (err, groups) => {
+      if (err) {
+        return res.status(500).json({ message: "Could not fetch groups" });
+      }
+      res.json({ groups: groups || [] });
+    }
+  );
+});
+
+// Make contribution to esusu
+app.post("/esusu/contribute", (req, res) => {
+  const { username, groupName } = req.body;
+
+  db.get("SELECT * FROM users WHERE username=?", [username], (err, user) => {
+    if (err || !user) {
+      return res.status(400).json({ message: "User not found" });
+    }
+
+    db.get("SELECT * FROM esusu_groups WHERE group_name=?", [groupName], (err2, group) => {
+      if (err2 || !group) {
+        return res.status(400).json({ message: "Group not found" });
+      }
+
+      // Check if user is member
+      db.get("SELECT * FROM esusu_members WHERE group_id=? AND username=?", [group.id, username], (err3, member) => {
+        if (!member) {
+          return res.status(400).json({ 
+            message: "You're not a member of this group!",
+            speak: "You're not a member of this group!"
+          });
+        }
+
+        if (user.balance < group.amount_per_person) {
+          return res.status(400).json({ 
+            message: `You need ₦${group.amount_per_person.toLocaleString()} but you only have ₦${user.balance.toLocaleString()}.`,
+            speak: `You need ${group.amount_per_person.toLocaleString()} Naira but you only have ${user.balance.toLocaleString()} Naira.`
+          });
+        }
+
+        const newBalance = user.balance - group.amount_per_person;
+
+        db.run("UPDATE users SET balance=? WHERE username=?", [newBalance, username], () => {
+          db.run(
+            "INSERT INTO esusu_contributions (group_id, username, amount, cycle_number, contributed_at) VALUES (?,?,?,?,?)",
+            [group.id, username, 1, group.amount_per_person, new Date().toISOString()]
+          );
+
+          db.run(
+            "INSERT INTO transactions (username, type, amount, to_user, date) VALUES (?,?,?,?,?)",
+            [username, "Esusu Contribution", group.amount_per_person, groupName, new Date().toISOString()]
+          );
+
+          res.json({ 
+            message: `Perfect! You've contributed ₦${group.amount_per_person.toLocaleString()} to "${groupName}". Your new balance is ₦${newBalance.toLocaleString()}.`,
+            speak: `Perfect! You've contributed ${group.amount_per_person.toLocaleString()} Naira to ${groupName}. Your new balance is ${newBalance.toLocaleString()} Naira.`,
+            balance: newBalance
+          });
+        });
+      });
+    });
+  });
+});
+
+// Check group status and who's next to collect
+app.get("/esusu/status/:groupName", (req, res) => {
+  const { groupName } = req.params;
+
+  db.get("SELECT * FROM esusu_groups WHERE group_name=?", [groupName], (err, group) => {
+    if (err || !group) {
+      return res.status(400).json({ message: "Group not found" });
+    }
+
+    db.all(
+      `SELECT m.username, m.position, m.has_collected 
+       FROM esusu_members m 
+       WHERE m.group_id=? 
+       ORDER BY m.position`,
+      [group.id],
+      (err2, members) => {
+        db.all(
+          "SELECT username, COUNT(*) as count FROM esusu_contributions WHERE group_id=? GROUP BY username",
+          [group.id],
+          (err3, contributions) => {
+            res.json({ 
+              group: group,
+              members: members || [],
+              contributions: contributions || []
+            });
+          }
+        );
+      }
+    );
+  });
 });
