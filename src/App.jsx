@@ -295,122 +295,124 @@ export default function App() {
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.card}>
-        <div style={styles.header}>
-          <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button 
-              onClick={() => setShowEsusu(!showEsusu)} 
-              style={{
-                ...styles.esusuButton,
-                background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
-              }}
-            >
-              {showEsusu ? "💬 Chat" : "🤝 Esusu"}
-            </button>
-            <button 
-              onClick={() => {
-                setIsLoggedIn(false);
-                setMessages([]);
-                setUsername("");
-                setPassword("");
-                setShowEsusu(false);
-              }} 
-              style={styles.logoutButton}
-            >
-              Logout
-            </button>
-          </div>
-        </div>
-
-        {showEsusu ? (
-          <EsusuView 
-            groups={esusuGroups}
-            onCreateGroup={createEsusuGroup}
-            onJoinGroup={joinEsusuGroup}
-            onContribute={contributeToEsusu}
-            username={username}
-          />
-        ) : (
-          <>
-            <div style={styles.chatWindow}>
-          {messages.map((m, idx) => (
-            <div
-              key={idx}
-              style={{
-                ...styles.bubble,
-                background: m.role === "user" ? "#1f2937" : "#4b5563",
-                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                maxWidth: "80%",
-              }}
-            >
-              {m.text}
-            </div>
-          ))}
-          {isThinking && (
-            <div style={{ ...styles.bubble, background: "#4b5563" }}>
-              SARA is thinking...
-            </div>
-          )}
-          <div ref={chatEndRef} />
-        </div>
-
-        <div style={styles.quickActions}>
+  <div style={styles.container}>
+    <div style={styles.card}>
+      <div style={styles.header}>
+        <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
+        <div style={{ display: "flex", gap: 8 }}>
           <button 
-            onClick={() => handleSend("check balance")} 
-            style={styles.quickButton}
-            disabled={isThinking}
-          >
-            💰 Balance
-          </button>
-          <button 
-            onClick={() => handleSend("buy 100 airtime")} 
-            style={styles.quickButton}
-            disabled={isThinking}
-          >
-            📱 Airtime
-          </button>
-          <button 
-            onClick={fetchHistory} 
-            style={styles.quickButton}
-            disabled={isThinking}
-          >
-            📊 History
-          </button>
-        </div>
-
-        <div style={styles.controls}>
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type a message or tap the mic..."
-            style={styles.chatInput}
-            onKeyDown={(e) => e.key === "Enter" && !isThinking && handleSend()}
-            disabled={isThinking}
-          />
-          <button 
-            onClick={() => handleSend()} 
-            style={styles.sendButton}
-            disabled={isThinking || !input.trim()}
-          >
-            Send
-          </button>
-          <button 
-            onClick={isListening ? stopListening : startListening} 
+            onClick={() => setShowEsusu(!showEsusu)} 
             style={{
-              ...styles.micButton,
-              background: isListening ? "#ef4444" : "#7c3aed"
+              ...styles.esusuButton,
+              background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
             }}
-            disabled={isThinking}
           >
-            {isListening ? "⏹️" : "🎤"}
+            {showEsusu ? "💬 Chat" : "🤝 Esusu"}
+          </button>
+          <button 
+            onClick={() => {
+              setIsLoggedIn(false);
+              setMessages([]);
+              setUsername("");
+              setPassword("");
+              setShowEsusu(false);
+            }} 
+            style={styles.logoutButton}
+          >
+            Logout
           </button>
         </div>
       </div>
+
+      {showEsusu ? (
+        <EsusuView 
+          groups={esusuGroups}
+          onCreateGroup={createEsusuGroup}
+          onJoinGroup={joinEsusuGroup}
+          onContribute={contributeToEsusu}
+          username={username}
+        />
+      ) : (
+        <>
+          <div style={styles.chatWindow}>
+            {messages.map((m, idx) => (
+              <div
+                key={idx}
+                style={{
+                  ...styles.bubble,
+                  background: m.role === "user" ? "#1f2937" : "#4b5563",
+                  alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "80%",
+                }}
+              >
+                {m.text}
+              </div>
+            ))}
+            {isThinking && (
+              <div style={{ ...styles.bubble, background: "#4b5563" }}>
+                SARA is thinking...
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          <div style={styles.quickActions}>
+            <button 
+              onClick={() => handleSend("check balance")} 
+              style={styles.quickButton}
+              disabled={isThinking}
+            >
+              💰 Balance
+            </button>
+            <button 
+              onClick={() => handleSend("buy 100 airtime")} 
+              style={styles.quickButton}
+              disabled={isThinking}
+            >
+              📱 Airtime
+            </button>
+            <button 
+              onClick={fetchHistory} 
+              style={styles.quickButton}
+              disabled={isThinking}
+            >
+              📊 History
+            </button>
+          </div>
+
+          <div style={styles.controls}>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Type a message or tap the mic..."
+              style={styles.chatInput}
+              onKeyDown={(e) => e.key === "Enter" && !isThinking && handleSend()}
+              disabled={isThinking}
+            />
+            <button 
+              onClick={() => handleSend()} 
+              style={styles.sendButton}
+              disabled={isThinking || !input.trim()}
+            >
+              Send
+            </button>
+            <button 
+              onClick={isListening ? stopListening : startListening} 
+              style={{
+                ...styles.micButton,
+                background: isListening ? "#ef4444" : "#7c3aed"
+              }}
+              disabled={isThinking}
+            >
+              {isListening ? "⏹️" : "🎤"}
+            </button>
+          </div>
+        </>
+      )}
     </div>
-  );
-}
+  </div>
+);
+
 
 // ------------------------- Styles -------------------------
 const styles = {
