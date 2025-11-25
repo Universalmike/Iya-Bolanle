@@ -16,7 +16,6 @@ export default function App() {
   const chatEndRef = useRef(null);
   const [showEsusu, setShowEsusu] = useState(false);
   const [esusuGroups, setEsusuGroups] = useState([]);
-  const [selectedGroup, setSelectedGroup] = useState(null);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -295,124 +294,296 @@ export default function App() {
   }
 
   return (
-  <div style={styles.container}>
-    <div style={styles.card}>
-      <div style={styles.header}>
-        <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button 
-            onClick={() => setShowEsusu(!showEsusu)} 
-            style={{
-              ...styles.esusuButton,
-              background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
-            }}
-          >
-            {showEsusu ? "💬 Chat" : "🤝 Esusu"}
-          </button>
-          <button 
-            onClick={() => {
-              setIsLoggedIn(false);
-              setMessages([]);
-              setUsername("");
-              setPassword("");
-              setShowEsusu(false);
-            }} 
-            style={styles.logoutButton}
-          >
-            Logout
-          </button>
+    <div style={styles.container}>
+      <div style={styles.card}>
+        <div style={styles.header}>
+          <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button 
+              onClick={() => setShowEsusu(!showEsusu)} 
+              style={{
+                ...styles.esusuButton,
+                background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
+              }}
+            >
+              {showEsusu ? "💬 Chat" : "🤝 Esusu"}
+            </button>
+            <button 
+              onClick={() => {
+                setIsLoggedIn(false);
+                setMessages([]);
+                setUsername("");
+                setPassword("");
+                setShowEsusu(false);
+              }} 
+              style={styles.logoutButton}
+            >
+              Logout
+            </button>
+          </div>
         </div>
+
+        {showEsusu ? (
+          <EsusuView 
+            groups={esusuGroups}
+            onCreateGroup={createEsusuGroup}
+            onJoinGroup={joinEsusuGroup}
+            onContribute={contributeToEsusu}
+            username={username}
+          />
+        ) : (
+          <>
+            <div style={styles.chatWindow}>
+              {messages.map((m, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    ...styles.bubble,
+                    background: m.role === "user" ? "#1f2937" : "#4b5563",
+                    alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                    maxWidth: "80%",
+                  }}
+                >
+                  {m.text}
+                </div>
+              ))}
+              {isThinking && (
+                <div style={{ ...styles.bubble, background: "#4b5563" }}>
+                  SARA is thinking...
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <div style={styles.quickActions}>
+              <button 
+                onClick={() => handleSend("check balance")} 
+                style={styles.quickButton}
+                disabled={isThinking}
+              >
+                💰 Balance
+              </button>
+              <button 
+                onClick={() => handleSend("buy 100 airtime")} 
+                style={styles.quickButton}
+                disabled={isThinking}
+              >
+                📱 Airtime
+              </button>
+              <button 
+                onClick={fetchHistory} 
+                style={styles.quickButton}
+                disabled={isThinking}
+              >
+                📊 History
+              </button>
+            </div>
+
+            <div style={styles.controls}>
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Type a message or tap the mic..."
+                style={styles.chatInput}
+                onKeyDown={(e) => e.key === "Enter" && !isThinking && handleSend()}
+                disabled={isThinking}
+              />
+              <button 
+                onClick={() => handleSend()} 
+                style={styles.sendButton}
+                disabled={isThinking || !input.trim()}
+              >
+                Send
+              </button>
+              <button 
+                onClick={isListening ? stopListening : startListening} 
+                style={{
+                  ...styles.micButton,
+                  background: isListening ? "#ef4444" : "#7c3aed"
+                }}
+                disabled={isThinking}
+              >
+                {isListening ? "⏹️" : "🎤"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ------------------------- Esusu View Component -------------------------
+function EsusuView({ groups, onCreateGroup, onJoinGroup, onContribute, username }) {
+  const [view, setView] = useState("list"); // list, create, join
+  const [formData, setFormData] = useState({
+    groupName: "",
+    amount: "",
+    frequency: "monthly",
+    members: "5"
+  });
+
+  const handleCreate = () => {
+    if (!formData.groupName || !formData.amount || !formData.members) {
+      alert("Please fill all fields");
+      return;
+    }
+    onCreateGroup(formData.groupName, formData.amount, formData.frequency, formData.members);
+    setView("list");
+    setFormData({ groupName: "", amount: "", frequency: "monthly", members: "5" });
+  };
+
+  const handleJoin = () => {
+    if (!formData.groupName) {
+      alert("Please enter group name");
+      return;
+    }
+    onJoinGroup(formData.groupName);
+    setView("list");
+    setFormData({ groupName: "", amount: "", frequency: "monthly", members: "5" });
+  };
+
+  if (view === "create") {
+    return (
+      <div style={styles.esusuContainer}>
+        <button onClick={() => setView("list")} style={styles.backButton}>← Back</button>
+        <h3 style={styles.esusuTitle}>Create Esusu Group 🤝</h3>
+        <p style={styles.esusuSubtitle}>Start a savings group with friends and family</p>
+        
+        <input
+          placeholder="Group name (e.g., Family Circle)"
+          value={formData.groupName}
+          onChange={(e) => setFormData({...formData, groupName: e.target.value})}
+          style={styles.input}
+        />
+        
+        <input
+          placeholder="Amount per person (e.g., 5000)"
+          type="number"
+          value={formData.amount}
+          onChange={(e) => setFormData({...formData, amount: e.target.value})}
+          style={styles.input}
+        />
+        
+        <select
+          value={formData.frequency}
+          onChange={(e) => setFormData({...formData, frequency: e.target.value})}
+          style={styles.input}
+        >
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+        
+        <select
+          value={formData.members}
+          onChange={(e) => setFormData({...formData, members: e.target.value})}
+          style={styles.input}
+        >
+          <option value="3">3 members</option>
+          <option value="4">4 members</option>
+          <option value="5">5 members</option>
+          <option value="6">6 members</option>
+          <option value="8">8 members</option>
+          <option value="10">10 members</option>
+          <option value="12">12 members</option>
+        </select>
+        
+        <div style={styles.infoBox}>
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5 }}>
+            💡 With {formData.members || "5"} members contributing ₦{formData.amount || "0"} {formData.frequency}, 
+            each person will collect ₦{((formData.members || 5) * (formData.amount || 0)).toLocaleString()} when it's their turn!
+          </p>
+        </div>
+        
+        <button onClick={handleCreate} style={styles.buttonPrimary}>
+          Create Group
+        </button>
+      </div>
+    );
+  }
+
+  if (view === "join") {
+    return (
+      <div style={styles.esusuContainer}>
+        <button onClick={() => setView("list")} style={styles.backButton}>← Back</button>
+        <h3 style={styles.esusuTitle}>Join Esusu Group 🚪</h3>
+        <p style={styles.esusuSubtitle}>Enter the name of the group you want to join</p>
+        
+        <input
+          placeholder="Group name (ask your friend for the exact name)"
+          value={formData.groupName}
+          onChange={(e) => setFormData({...formData, groupName: e.target.value})}
+          style={styles.input}
+        />
+        
+        <button onClick={handleJoin} style={styles.buttonPrimary}>
+          Join Group
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.esusuContainer}>
+      <h3 style={styles.esusuTitle}>My Esusu Groups 🤝</h3>
+      <p style={styles.esusuSubtitle}>Save together, collect in turns</p>
+      
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <button onClick={() => setView("create")} style={styles.buttonPrimary}>
+          + Create Group
+        </button>
+        <button onClick={() => setView("join")} style={styles.buttonSecondary}>
+          Join Group
+        </button>
       </div>
 
-      {showEsusu ? (
-        <EsusuView 
-          groups={esusuGroups}
-          onCreateGroup={createEsusuGroup}
-          onJoinGroup={joinEsusuGroup}
-          onContribute={contributeToEsusu}
-          username={username}
-        />
+      {groups.length === 0 ? (
+        <div style={styles.emptyState}>
+          <p style={{ fontSize: 48, margin: "20px 0" }}>🤝</p>
+          <h4 style={{ margin: "10px 0", color: "#94a3b8" }}>No groups yet</h4>
+          <p style={{ margin: "10px 0", color: "#64748b", fontSize: 14 }}>
+            Create a group or join one to start saving with friends!
+          </p>
+        </div>
       ) : (
-        <>
-          <div style={styles.chatWindow}>
-            {messages.map((m, idx) => (
-              <div
-                key={idx}
-                style={{
-                  ...styles.bubble,
-                  background: m.role === "user" ? "#1f2937" : "#4b5563",
-                  alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                  maxWidth: "80%",
-                }}
+        <div style={styles.groupsList}>
+          {groups.map((group, idx) => (
+            <div key={idx} style={styles.groupCard}>
+              <div style={{ flex: 1 }}>
+                <h4 style={{ margin: "0 0 8px 0", fontSize: 16 }}>{group.group_name}</h4>
+                <p style={{ margin: "4px 0", fontSize: 13, color: "#94a3b8" }}>
+                  ₦{group.amount_per_person.toLocaleString()} • {group.frequency}
+                </p>
+                <p style={{ margin: "4px 0", fontSize: 13, color: "#94a3b8" }}>
+                  Your position: #{group.position} of {group.total_members}
+                </p>
+                <p style={{ margin: "4px 0", fontSize: 13, color: group.has_collected ? "#10b981" : "#f59e0b" }}>
+                  {group.has_collected ? "✓ Collected" : "⏳ Waiting for turn"}
+                </p>
+              </div>
+              <button 
+                onClick={() => onContribute(group.group_name)}
+                style={styles.contributeButton}
               >
-                {m.text}
-              </div>
-            ))}
-            {isThinking && (
-              <div style={{ ...styles.bubble, background: "#4b5563" }}>
-                SARA is thinking...
-              </div>
-            )}
-            <div ref={chatEndRef} />
-          </div>
-
-          <div style={styles.quickActions}>
-            <button 
-              onClick={() => handleSend("check balance")} 
-              style={styles.quickButton}
-              disabled={isThinking}
-            >
-              💰 Balance
-            </button>
-            <button 
-              onClick={() => handleSend("buy 100 airtime")} 
-              style={styles.quickButton}
-              disabled={isThinking}
-            >
-              📱 Airtime
-            </button>
-            <button 
-              onClick={fetchHistory} 
-              style={styles.quickButton}
-              disabled={isThinking}
-            >
-              📊 History
-            </button>
-          </div>
-
-          <div style={styles.controls}>
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Type a message or tap the mic..."
-              style={styles.chatInput}
-              onKeyDown={(e) => e.key === "Enter" && !isThinking && handleSend()}
-              disabled={isThinking}
-            />
-            <button 
-              onClick={() => handleSend()} 
-              style={styles.sendButton}
-              disabled={isThinking || !input.trim()}
-            >
-              Send
-            </button>
-            <button 
-              onClick={isListening ? stopListening : startListening} 
-              style={{
-                ...styles.micButton,
-                background: isListening ? "#ef4444" : "#7c3aed"
-              }}
-              disabled={isThinking}
-            >
-              {isListening ? "⏹️" : "🎤"}
-            </button>
-          </div>
-        </>
+                Pay ₦{group.amount_per_person.toLocaleString()}
+              </button>
+            </div>
+          ))}
+        </div>
       )}
-    </div>
-  </div>
-);
 
+      <div style={styles.infoBox}>
+        <h4 style={{ margin: "0 0 8px 0", fontSize: 14 }}>How Esusu/Ajo Works 💡</h4>
+        <p style={{ margin: "4px 0", fontSize: 13, lineHeight: 1.5, color: "#94a3b8" }}>
+          Everyone contributes the same amount regularly. Members take turns collecting the full pooled amount. 
+          If you're in position 1, you collect first. Position 2 waits for the next round, and so on. 
+          It's like getting an interest-free loan from friends! 🎯
+        </p>
+      </div>
+    </div>
+  );
+}
 
 // ------------------------- Styles -------------------------
 const styles = {
@@ -639,5 +810,3 @@ const styles = {
     marginBottom: 20,
   },
 };
-
-export default App;
