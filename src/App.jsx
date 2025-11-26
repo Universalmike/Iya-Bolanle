@@ -16,6 +16,10 @@ export default function App() {
   const chatEndRef = useRef(null);
   const [showEsusu, setShowEsusu] = useState(false);
   const [esusuGroups, setEsusuGroups] = useState([]);
+  const [showBillScanner, setShowBillScanner] = useState(false);
+  const [scannedBill, setScannedBill] = useState(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const fileInputRef = useRef(null);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -125,6 +129,69 @@ export default function App() {
       fetchEsusuGroups();
     }
   }, [isLoggedIn]);
+
+  // ------------------------- Bill Scanner Functions -------------------------
+  const handleImageUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    // Check if file is an image
+    if (!file.type.startsWith('image/')) {
+      alert('Please upload an image file');
+      return;
+    }
+
+    setIsScanning(true);
+    setScannedBill(null);
+
+    // Convert to base64
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        // Auto-detect bill type from filename or default to electricity
+        let billType = "electricity";
+        const filename = file.name.toLowerCase();
+        if (filename.includes('water')) billType = "water";
+        else if (filename.includes('internet') || filename.includes('wifi')) billType = "internet";
+        else if (filename.includes('cable') || filename.includes('dstv') || filename.includes('gotv')) billType = "cable";
+
+        const res = await axios.post(`${API_URL}/scan-bill`, {
+          username,
+          imageData: reader.result,
+          billType: billType
+        });
+
+        setScannedBill(res.data.billData);
+        setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
+        speakText(res.data.speak || res.data.message);
+      } catch (err) {
+        alert('Failed to scan bill. Please try again.');
+      } finally {
+        setIsScanning(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handlePayBill = async () => {
+    if (!scannedBill) return;
+
+    try {
+      const res = await axios.post(`${API_URL}/pay-bill`, {
+        username,
+        billData: scannedBill
+      });
+
+      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
+      speakText(res.data.speak || res.data.message);
+      setScannedBill(null);
+      setShowBillScanner(false);
+    } catch (err) {
+      const errorMsg = err.response?.data?.message || "Payment failed";
+      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
+      speakText(errorMsg);
+    }
+  };
 
   // ------------------------- Fetch History -------------------------
   const fetchHistory = async () => {
@@ -298,9 +365,24 @@ export default function App() {
       <div style={styles.card}>
         <div style={styles.header}>
           <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button 
-              onClick={() => setShowEsusu(!showEsusu)} 
+              onClick={() => {
+                setShowEsusu(false);
+                setShowBillScanner(!showBillScanner);
+              }} 
+              style={{
+                ...styles.esusuButton,
+                background: showBillScanner ? "#7c3aed" : "rgba(124,58,237,0.1)"
+              }}
+            >
+              {showBillScanner ? "💬 Chat" : "📄 Scan Bill"}
+            </button>
+            <button 
+              onClick={() => {
+                setShowBillScanner(false);
+                setShowEsusu(!showEsusu);
+              }} 
               style={{
                 ...styles.esusuButton,
                 background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
@@ -315,6 +397,7 @@ export default function App() {
                 setUsername("");
                 setPassword("");
                 setShowEsusu(false);
+                setShowBillScanner(false);
               }} 
               style={styles.logoutButton}
             >
@@ -323,7 +406,15 @@ export default function App() {
           </div>
         </div>
 
-        {showEsusu ? (
+        {showBillScanner ? (
+          <BillScannerView
+            onImageUpload={handleImageUpload}
+            scannedBill={scannedBill}
+            isScanning={isScanning}
+            onPayBill={handlePayBill}
+            fileInputRef={fileInputRef}
+          />
+        ) : showEsusu ? (
           <EsusuView 
             groups={esusuGroups}
             onCreateGroup={createEsusuGroup}
@@ -409,6 +500,150 @@ export default function App() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ------------------------- Bill Scanner View Component -------------------------
+function BillScannerView({ onImageUpload, scannedBill, isScanning, onPayBill, fileInputRef }) {
+  return (
+    <div style={styles.esusuContainer}>
+      <h3 style={styles.esusuTitle}>📄 Scan Your Bill</h3>
+      <p style={styles.esusuSubtitle}>Take a photo or upload an image of your utility bill</p>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={onImageUpload}
+        style={{ display: 'none' }}
+      />
+
+      {!scannedBill && !isScanning && (
+        <>
+          <div style={styles.uploadArea} onClick={() => fileInputRef.current?.click()}>
+            <div style={styles.uploadIcon}>📸</div>
+            <h4 style={{ margin: "16px 0 8px 0", fontSize: 18 }}>Upload Bill Image</h4>
+            <p style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>
+              Click here to select an image from your device
+            </p>
+            <p style={{ margin: "8px 0 0 0", fontSize: 12, color: "#64748b" }}>
+              Supports: Electricity, Water, Internet, Cable TV bills
+            </p>
+          </div>
+
+          <div style={styles.billTypeGrid}>
+            <div style={styles.billTypeCard}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>⚡</div>
+              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Electricity</p>
+            </div>
+            <div style={styles.billTypeCard}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>💧</div>
+              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Water</p>
+            </div>
+            <div style={styles.billTypeCard}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>📡</div>
+              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Internet</p>
+            </div>
+            <div style={styles.billTypeCard}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>📺</div>
+              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Cable TV</p>
+            </div>
+          </div>
+
+          <div style={styles.infoBox}>
+            <h4 style={{ margin: "0 0 8px 0", fontSize: 14 }}>How It Works 💡</h4>
+            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "#94a3b8" }}>
+              1. Take a clear photo of your bill or upload from gallery<br/>
+              2. SARA will automatically extract the payment details<br/>
+              3. Review the details and confirm payment<br/>
+              4. Done! Your bill is paid instantly 🎉
+            </p>
+          </div>
+        </>
+      )}
+
+      {isScanning && (
+        <div style={styles.scanningContainer}>
+          <div style={styles.scanningAnimation}>
+            <div style={styles.spinner}></div>
+          </div>
+          <h4 style={{ margin: "20px 0 8px 0", fontSize: 18 }}>Scanning Bill...</h4>
+          <p style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>
+            SARA is reading your bill details
+          </p>
+        </div>
+      )}
+
+      {scannedBill && !isScanning && (
+        <div style={styles.billDetailsContainer}>
+          <div style={styles.successBadge}>✓ Bill Scanned Successfully</div>
+          
+          <div style={styles.billCard}>
+            <div style={styles.billHeader}>
+              <h4 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>{scannedBill.provider}</h4>
+              <div style={styles.billAmount}>₦{scannedBill.amount.toLocaleString()}</div>
+            </div>
+
+            <div style={styles.billDetails}>
+              <div style={styles.billDetailRow}>
+                <span style={styles.billLabel}>Account Number:</span>
+                <span style={styles.billValue}>{scannedBill.accountNumber}</span>
+              </div>
+              <div style={styles.billDetailRow}>
+                <span style={styles.billLabel}>Customer Name:</span>
+                <span style={styles.billValue}>{scannedBill.customerName}</span>
+              </div>
+              {scannedBill.billPeriod && (
+                <div style={styles.billDetailRow}>
+                  <span style={styles.billLabel}>Bill Period:</span>
+                  <span style={styles.billValue}>{scannedBill.billPeriod}</span>
+                </div>
+              )}
+              {scannedBill.package && (
+                <div style={styles.billDetailRow}>
+                  <span style={styles.billLabel}>Package:</span>
+                  <span style={styles.billValue}>{scannedBill.package}</span>
+                </div>
+              )}
+              {scannedBill.meterNumber && (
+                <div style={styles.billDetailRow}>
+                  <span style={styles.billLabel}>Meter Number:</span>
+                  <span style={styles.billValue}>{scannedBill.meterNumber}</span>
+                </div>
+              )}
+              <div style={styles.billDetailRow}>
+                <span style={styles.billLabel}>Due Date:</span>
+                <span style={styles.billValue}>
+                  {new Date(scannedBill.dueDate).toLocaleDateString('en-NG', {
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric'
+                  })}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+            <button onClick={onPayBill} style={styles.payButton}>
+              Pay ₦{scannedBill.amount.toLocaleString()} Now
+            </button>
+            <button 
+              onClick={() => fileInputRef.current?.click()} 
+              style={styles.buttonSecondary}
+            >
+              Scan Another
+            </button>
+          </div>
+
+          <div style={styles.securityNote}>
+            <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>
+              🔒 Your payment is secured and will be processed instantly
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -808,5 +1043,123 @@ const styles = {
     background: "#081127",
     borderRadius: 12,
     marginBottom: 20,
+  },
+  uploadArea: {
+    padding: "60px 20px",
+    borderRadius: 16,
+    background: "#081127",
+    border: "2px dashed rgba(124,58,237,0.3)",
+    textAlign: "center",
+    cursor: "pointer",
+    marginBottom: 24,
+    transition: "all 0.3s",
+  },
+  uploadIcon: {
+    fontSize: 64,
+    marginBottom: 8,
+  },
+  billTypeGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, 1fr)",
+    gap: 12,
+    marginBottom: 24,
+  },
+  billTypeCard: {
+    padding: 20,
+    borderRadius: 12,
+    background: "#081127",
+    border: "1px solid rgba(255,255,255,0.05)",
+    textAlign: "center",
+  },
+  scanningContainer: {
+    padding: "60px 20px",
+    textAlign: "center",
+  },
+  scanningAnimation: {
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 20,
+  },
+  spinner: {
+    width: 60,
+    height: 60,
+    border: "4px solid rgba(124,58,237,0.1)",
+    borderTop: "4px solid #7c3aed",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite",
+  },
+  billDetailsContainer: {
+    animation: "fadeIn 0.5s",
+  },
+  successBadge: {
+    display: "inline-block",
+    padding: "8px 16px",
+    borderRadius: 20,
+    background: "rgba(16,185,129,0.1)",
+    border: "1px solid rgba(16,185,129,0.3)",
+    color: "#10b981",
+    fontSize: 13,
+    fontWeight: 600,
+    marginBottom: 20,
+  },
+  billCard: {
+    background: "#081127",
+    borderRadius: 16,
+    padding: 24,
+    border: "1px solid rgba(124,58,237,0.2)",
+  },
+  billHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingBottom: 20,
+    borderBottom: "1px solid rgba(255,255,255,0.05)",
+    marginBottom: 20,
+  },
+  billAmount: {
+    fontSize: 28,
+    fontWeight: 700,
+    color: "#7c3aed",
+  },
+  billDetails: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  billDetailRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "8px 0",
+  },
+  billLabel: {
+    fontSize: 13,
+    color: "#94a3b8",
+  },
+  billValue: {
+    fontSize: 14,
+    fontWeight: 600,
+    color: "#fff",
+    textAlign: "right",
+  },
+  payButton: {
+    flex: 1,
+    padding: "14px 20px",
+    borderRadius: 10,
+    border: "none",
+    background: "#10b981",
+    color: "#fff",
+    cursor: "pointer",
+    fontWeight: 600,
+    fontSize: 16,
+  },
+  securityNote: {
+    marginTop: 16,
+    padding: 12,
+    borderRadius: 8,
+    background: "rgba(59,130,246,0.05)",
+    border: "1px solid rgba(59,130,246,0.1)",
+    textAlign: "center",
   },
 };
