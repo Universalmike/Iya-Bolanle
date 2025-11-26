@@ -261,6 +261,109 @@ app.listen(PORT, () => {
   console.log(`🚀 SARA backend running on port ${PORT}`);
 });
 
+// --------- Image to Pay - Bill Scanner ----------
+app.post("/scan-bill", (req, res) => {
+  const { username, imageData, billType } = req.body;
+  
+  if (!username || !imageData) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  // In a real implementation, you would use OCR here (like Tesseract.js or cloud OCR APIs)
+  // For now, we'll simulate the extraction with random/demo data
+  
+  // Simulate different bill types
+  const mockBillData = {
+    electricity: {
+      provider: "EKEDC",
+      accountNumber: "1234567890",
+      customerName: username,
+      amount: Math.floor(Math.random() * 5000) + 2000,
+      dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      billPeriod: "November 2024",
+      meterNumber: "45678901234"
+    },
+    water: {
+      provider: "Lagos Water Corp",
+      accountNumber: "WTR" + Math.floor(Math.random() * 1000000),
+      customerName: username,
+      amount: Math.floor(Math.random() * 3000) + 1000,
+      dueDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+      billPeriod: "November 2024"
+    },
+    internet: {
+      provider: "Spectranet",
+      accountNumber: "INT" + Math.floor(Math.random() * 1000000),
+      customerName: username,
+      amount: Math.floor(Math.random() * 15000) + 5000,
+      dueDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+      package: "Unlimited 50Mbps"
+    },
+    cable: {
+      provider: "DSTV",
+      accountNumber: "DST" + Math.floor(Math.random() * 10000000),
+      customerName: username,
+      amount: Math.floor(Math.random() * 10000) + 3000,
+      dueDate: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString(),
+      package: "Compact Plus"
+    }
+  };
+
+  const detectedType = billType || "electricity";
+  const billData = mockBillData[detectedType] || mockBillData.electricity;
+
+  res.json({
+    success: true,
+    billData: billData,
+    message: `I've scanned your ${detectedType} bill! Here's what I found.`,
+    speak: `I've scanned your ${detectedType} bill! The amount is ${billData.amount} Naira.`
+  });
+});
+
+// Pay a scanned bill
+app.post("/pay-bill", (req, res) => {
+  const { username, billData } = req.body;
+
+  if (!username || !billData) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  db.get("SELECT * FROM users WHERE username=?", [username], (err, user) => {
+    if (err || !user) {
+      return res.status(400).json({ message: "User not found" });
+    }
+
+    const amount = billData.amount;
+
+    if (user.balance < amount) {
+      return res.status(400).json({
+        message: `You need ₦${amount.toLocaleString()} but only have ₦${user.balance.toLocaleString()}.`,
+        speak: `You need ${amount.toLocaleString()} Naira but only have ${user.balance.toLocaleString()} Naira.`
+      });
+    }
+
+    const newBalance = user.balance - amount;
+
+    db.run("UPDATE users SET balance=? WHERE username=?", [newBalance, username], (updateErr) => {
+      if (updateErr) {
+        return res.status(500).json({ message: "Payment failed. Please try again." });
+      }
+
+      db.run(
+        "INSERT INTO transactions (username, type, amount, to_user, date) VALUES (?,?,?,?,?)",
+        [username, "Bill Payment", amount, `${billData.provider} - ${billData.accountNumber}`, new Date().toISOString()]
+      );
+
+      res.json({
+        message: `Perfect! Your ${billData.provider} bill of ₦${amount.toLocaleString()} has been paid. New balance: ₦${newBalance.toLocaleString()}.`,
+        speak: `Perfect! Your ${billData.provider} bill of ${amount.toLocaleString()} Naira has been paid. New balance: ${newBalance.toLocaleString()} Naira.`,
+        balance: newBalance,
+        receiptNumber: "RCP" + Date.now()
+      });
+    });
+  });
+});
+
 // --------- Esusu/Ajo Features ----------
 
 // Create a new esusu group
