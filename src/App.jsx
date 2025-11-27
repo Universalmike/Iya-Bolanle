@@ -61,9 +61,9 @@ export default function App() {
     try {
       const res = await axios.post(`${API_URL}/login`, { username, password });
       setIsLoggedIn(true);
-      const welcomeMsg = `Hi ${username}! I'm SARA, your personal financial assistant. I'm here to help you manage your money. You can ask me to check your balance, buy airtime, transfer funds, or view your transaction history. What would you like to do?`;
+      const welcomeMsg = res.data.welcomeMessage || `Hi ${username}! I'm SARA, your personal financial assistant.`;
       setMessages([{ role: "assistant", text: welcomeMsg }]);
-      speakText(`Welcome back ${username}! I'm SARA, your personal financial assistant. How can I help you today?`);
+      speakText(welcomeMsg);
     } catch (err) {
       alert(err.response?.data?.message || "Login failed");
     }
