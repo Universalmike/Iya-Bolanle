@@ -61,7 +61,7 @@ export default function App() {
     try {
       const res = await axios.post(`${API_URL}/login`, { username, password });
       setIsLoggedIn(true);
-      const welcomeMsg = res.data.welcomeMessage || `Hi ${username}! I'm SARA, your personal financial assistant.`;
+      const welcomeMsg = res.data.welcomeMessage || `Hi ${username}! I'm SARA, your financial assistant.`;
       setMessages([{ role: "assistant", text: welcomeMsg }]);
       speakText(welcomeMsg);
     } catch (err) {
