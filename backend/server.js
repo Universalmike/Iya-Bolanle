@@ -14,6 +14,10 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// Gemini API configuration
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-exp:generateContent';
+
 // Test connection
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
@@ -90,6 +94,62 @@ const createTables = async () => {
 
 createTables();
 
+// --------- Gemini AI Helper Function ----------
+async function getGeminiAdvice(userQuery, userContext) {
+  if (!GEMINI_API_KEY) {
+    return "Financial AI advice is not available right now. Please configure your Gemini API key.";
+  }
+
+  try {
+    const systemPrompt = `You are SARA, a friendly Nigerian financial assistant. You help people with:
+- Financial advice and budgeting tips
+- Investment suggestions suitable for Nigerians (Treasury bills, mutual funds, real estate, stocks)
+- Savings strategies and emergency fund planning
+- Managing debt and expenses
+- Understanding Nigerian financial products (EKEDC bills, DSTV, mobile money, etc.)
+
+Context about the user:
+${userContext}
+
+Keep responses:
+- Practical and specific to Nigeria
+- Warm and conversational (like talking to a friend)
+- Brief (2-3 paragraphs max)
+- Action-oriented with clear next steps
+- In the same language the user is speaking
+
+IMPORTANT: If the user asks in Pidgin, Yoruba, Igbo, or Hausa, respond in that same language.`;
+
+    const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{
+            text: `${systemPrompt}\n\nUser question: ${userQuery}`
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 500,
+          topP: 0.95,
+        }
+      })
+    });
+
+    const data = await response.json();
+    
+    if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+      return data.candidates[0].content.parts[0].text;
+    }
+    
+    return "I'm having trouble connecting to my AI brain right now. Try asking again!";
+  } catch (error) {
+    console.error("Gemini API error:", error);
+    return "I'm having trouble thinking right now. Please try again!";
+  }
+}
+
 // --------- Auth ----------
 app.post("/signup", async (req, res) => {
   const { username, password } = req.body;
@@ -161,7 +221,7 @@ app.post("/action", async (req, res) => {
       return res.json({ 
         message: message,
         balance: user.balance,
-        speak: message.replace(/₦/g, 'Naira '),
+        speak: message.replace(/₦/g, 'Naira ').replace(/Ẹ/g, 'E').replace(/ọ́/g, 'o').replace(/ị/g, 'i'),
         language: detectedLang
       });
     }
@@ -296,6 +356,35 @@ app.post("/action", async (req, res) => {
                  detectedLang === 'hausa' ? "Esusu (wanda ake kira Ajo) hanya ce ta adana kuɗi tare da abokai! Kowa zai bayar da kuɗi, kuma kowa zai karɓi lokacin da ya isa gare shi. Kuna son ƙirƙirar ƙungiya ko shiga ɗaya?" :
                  "Esusu (also called Ajo) lets you save with friends! Everyone contributes regularly, and each person takes turns collecting. Want to create a group or join one?",
         speak: "Esusu, also called Ajo, lets you save with friends! Want to create a group or join one?"
+      });
+    }
+
+    // ------------------------- AI Financial Advice -------------------------
+    // Check if user is asking for advice, tips, investment, or general financial questions
+    if (/\b(advice|tip|invest|save|budget|plan|suggest|recommend|help|what should|how can|guide|smart|wise)\b/.test(lowerText) && 
+        !/\b(balance|airtime|transfer|send|pay)\b/.test(lowerText)) {
+      
+      // Get recent transaction history for context
+      const historyResult = await pool.query(
+        "SELECT type, amount, to_user FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 5",
+        [username]
+      );
+      
+      const userContext = `
+User: ${username}
+Current Balance: ₦${user.balance.toLocaleString()}
+Recent transactions: ${historyResult.rows.map(t => `${t.type} ₦${t.amount}`).join(', ') || 'None yet'}
+Language: ${detectedLang}
+      `;
+
+      const aiResponse = await getGeminiAdvice(text, userContext);
+      
+      return res.json({
+        message: aiResponse,
+        balance: user.balance,
+        speak: aiResponse.substring(0, 300), // Shorten for TTS
+        language: detectedLang,
+        isAiAdvice: true
       });
     }
 
