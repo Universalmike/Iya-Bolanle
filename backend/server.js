@@ -96,27 +96,41 @@ createTables();
 
 // --------- Language Detection ----------
 const languagePatterns = {
-  pidgin: /\b(wetin|dey|abeg|una|abi|no wahala|how far|wan|make we|na so|wahala|oga|sabi|chop)\b/i,
-  yoruba: /\b(bawo|ku|pele|dabo|se|owo|mo|ni|ti|ko|wa|daadaa)\b/i,
-  igbo: /\b(kedu|ndewo|biko|unu|nna|nwanne|nnoo|bia|gaa|mma|daalu)\b/i,
-  hausa: /\b(sannu|yaya|lafiya|gode|sai|barka|kuma|ina|kai|wallahi)\b/i
+  pidgin: /\b(wetin|dey|abeg|una|abi|no wahala|how far|wan|make we|na so|wahala|oga|sabi|chop|belle|fit|don|go|come|talk|see|wey|dem|im|e don|no be)\b/i,
+  yoruba: /\b(bawo|ẹ ku|e ku|pele|o dabo|dabo|se|owo|mo|ni|ti|ko|wa|daadaa|ẹ se|e se|wo|mi|fun|re|ninu|apo|miiran)\b/i,
+  igbo: /\b(kedu|ndewo|biko|unu|nna|nwanne|nnoo|bia|gaa|mma|daalu|daalụ|meela|lelee|ego|di|ugbu|bu|nwere|ihe|ozo|choro|foduru)\b/i,
+  hausa: /\b(sannu|yaya|lafiya|na gode|gode|sai|barka|kuma|ina|kai|ke|dan|yar|wallahi|duba|kudin|kuɗin|kake|shine|kana|bukatar|wani|abu)\b/i
 };
 
 const detectLanguage = (text) => {
   const lowerText = text.toLowerCase();
+  
+  // Count matches for each language
+  const scores = {};
   for (const [lang, pattern] of Object.entries(languagePatterns)) {
-    if (pattern.test(lowerText)) {
-      return lang;
+    const matches = lowerText.match(pattern);
+    scores[lang] = matches ? matches.length : 0;
+  }
+  
+  // Find language with highest score
+  let maxScore = 0;
+  let detectedLang = 'english';
+  
+  for (const [lang, score] of Object.entries(scores)) {
+    if (score > maxScore) {
+      maxScore = score;
+      detectedLang = lang;
     }
   }
-  return 'english';
+  
+  return detectedLang;
 };
 
 // --------- Translations ----------
 const translations = {
   balance: {
     english: (name, balance) => `Hey ${name}! Your current balance is ₦${balance.toLocaleString()}. Need anything else?`,
-    pidgin: (name, balance) => `My guy ${name}! Your money balance na ₦${balance.toLocaleString()} now. You need anything else?`,
+    pidgin: (name, balance) => `Oga ${name}! Your money balance na ₦${balance.toLocaleString()} o. Wetin you wan do again?`,
     yoruba: (name, balance) => `E ku ise ${name}! Owo to wa ninu apo re yi je ₦${balance.toLocaleString()}. Se mo le se ohun miiran fun e?`,
     igbo: (name, balance) => `Ndewo ${name}! Ego gi di ugbu a bu ₦${balance.toLocaleString()}. O nwere ihe ozo i choro?`,
     hausa: (name, balance) => `Sannu ${name}! Kudin da kake da shi yanzu shine ₦${balance.toLocaleString()}. Kana bukatar wani abu?`
@@ -147,29 +161,46 @@ const translations = {
 // --------- Gemini AI Function ----------
 async function getGeminiAdvice(userQuery, userContext, language) {
   if (!GEMINI_API_KEY) {
-    return "AI advice is not available right now. Please add your Gemini API key.";
+    const responses = {
+      english: "I'd love to give you financial advice, but my AI brain needs to be activated first. Ask your admin to add a Gemini API key!",
+      pidgin: "I wan give you advice, but my AI brain never activate yet. Tell your admin make e add Gemini API key!",
+      yoruba: "Mo fẹ́ fún ọ ní ìmọ̀ràn, ṣùgbọ́n kò tí ì múlẹ̀. Sọ fún admin láti fi API key sí!",
+      igbo: "Achọrọ m inye gị ndụmọdụ, mana AI m amalitebeghị. Gwa admin ka o tinye Gemini API key!",
+      hausa: "Ina so in ba ku shawara, amma AI na bai fara aiki ba. Gaya wa admin ya sanya Gemini API key!"
+    };
+    return responses[language] || responses.english;
   }
 
   try {
-    const languageInstruction = language === 'english' ? '' : 
-      `IMPORTANT: Respond in ${language === 'pidgin' ? 'Nigerian Pidgin' : language} language.`;
+    let languageInstruction = '';
+    if (language === 'pidgin') {
+      languageInstruction = 'CRITICAL: You MUST respond ONLY in Nigerian Pidgin English. Use words like: wetin, dey, abeg, na, fit, don, go, make, e be say, no be, plenty, small small.';
+    } else if (language === 'yoruba') {
+      languageInstruction = 'CRITICAL: You MUST respond ONLY in Yoruba language. Use proper Yoruba words and structure.';
+    } else if (language === 'igbo') {
+      languageInstruction = 'CRITICAL: You MUST respond ONLY in Igbo language. Use proper Igbo words and structure.';
+    } else if (language === 'hausa') {
+      languageInstruction = 'CRITICAL: You MUST respond ONLY in Hausa language. Use proper Hausa words and structure.';
+    }
 
-    const systemPrompt = `You are SARA, a friendly Nigerian financial assistant. ${languageInstruction}
+    const systemPrompt = `You are SARA, a friendly Nigerian financial assistant helping people with money.
 
-Help with:
-- Financial advice and budgeting tips
-- Investment suggestions for Nigerians (Treasury bills, mutual funds, stocks)
-- Savings strategies
-- Nigerian financial products
+${languageInstruction}
 
-User context:
+Context about user:
 ${userContext}
 
-Keep responses:
-- Brief (2-3 short paragraphs)
-- Practical for Nigeria
-- Warm and friendly
-- Action-oriented`;
+Give advice on:
+- Nigerian investments (Treasury bills, mutual funds, PiggyVest, Cowrywise, Chaka)
+- Savings strategies
+- Budgeting tips
+- Nigerian banks and financial products
+
+Keep response:
+- Very brief (2-3 short sentences)
+- Practical and actionable
+- Specific to Nigeria
+- Friendly and conversational`;
 
     const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -177,26 +208,38 @@ Keep responses:
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `${systemPrompt}\n\nUser: ${userQuery}`
+            text: `${systemPrompt}\n\nUser question: ${userQuery}\n\nRespond now:`
           }]
         }],
         generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 400,
+          temperature: 0.9,
+          maxOutputTokens: 300,
+          topP: 0.95,
         }
       })
     });
 
+    if (!response.ok) {
+      throw new Error(`Gemini API error: ${response.status}`);
+    }
+
     const data = await response.json();
     
     if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-      return data.candidates[0].content.parts[0].text;
+      return data.candidates[0].content.parts[0].text.trim();
     }
     
-    return "I'm having trouble thinking right now. Try again!";
+    return "I'm having trouble thinking right now. Please try asking again!";
   } catch (error) {
     console.error("Gemini error:", error);
-    return "I'm having trouble connecting. Try again!";
+    const responses = {
+      english: "Sorry, I'm having trouble connecting to my AI brain. Try again in a moment!",
+      pidgin: "Sorry o! My AI brain no dey work well now. Try again small!",
+      yoruba: "Má bínú! AI mi kò ṣiṣẹ́ dáadáa báyìí. Gbìyànjú padà!",
+      igbo: "Ndo! AI m anaghị arụ ọrụ ugbu a. Gbalịa ọzọ!",
+      hausa: "Yi hakuri! AI na baya aiki sosai yanzu. Sake gwadawa!"
+    };
+    return responses[language] || responses.english;
   }
 }
 
@@ -266,12 +309,16 @@ app.post("/action", async (req, res) => {
     const lowerText = text.toLowerCase();
 
     // Check balance
-    if (/balance|wetin.*balance|owo.*mi|ego.*m|kudin/i.test(lowerText)) {
+    if (/balance|wetin.*balance|owo.*mi|wo.*owo|ego.*m|lelee.*ego|kudin|duba.*kudin/i.test(lowerText)) {
+      console.log(`Balance check - Detected language: ${detectedLang}`);
       const message = translations.balance[detectedLang](username, user.balance);
       return res.json({ 
         message: message,
         balance: user.balance,
-        speak: message.replace(/₦/g, 'Naira '),
+        speak: message.replace(/₦/g, 'Naira ').replace(/[ẹọṣí]/gi, (match) => {
+          const map = {'ẹ': 'e', 'ọ': 'o', 'ṣ': 's', 'í': 'i', 'Ẹ': 'E', 'Ọ': 'O', 'Ṣ': 'S', 'Í': 'I'};
+          return map[match] || match;
+        }),
         language: detectedLang
       });
     }
@@ -366,8 +413,10 @@ app.post("/action", async (req, res) => {
     }
 
     // AI Financial Advice
-    if (/advice|tip|invest|save|budget|plan|suggest|recommend|help|guide|what.*should|how.*can/i.test(lowerText) && 
-        !/balance|airtime|transfer/i.test(lowerText)) {
+    if (/advice|tip|invest|investment|save|saving|budget|plan|suggest|recommendation|recommend|help.*money|guide|what.*should|how.*can|wetin.*fit|what.*make|how.*take/i.test(lowerText) && 
+        !/balance|airtime|transfer|send|pay/i.test(lowerText)) {
+      
+      console.log(`AI Advice request - Language: ${detectedLang}`);
       
       const historyResult = await pool.query(
         "SELECT type, amount FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 5",
@@ -375,8 +424,10 @@ app.post("/action", async (req, res) => {
       );
       
       const userContext = `
+User: ${username}
 Balance: ₦${user.balance.toLocaleString()}
-Recent: ${historyResult.rows.map(t => `${t.type} ₦${t.amount}`).join(', ') || 'No transactions'}
+Recent transactions: ${historyResult.rows.map(t => `${t.type} ₦${t.amount}`).join(', ') || 'No recent transactions'}
+Language preference: ${detectedLang}
       `.trim();
 
       const aiResponse = await getGeminiAdvice(text, userContext, detectedLang);
@@ -384,8 +435,12 @@ Recent: ${historyResult.rows.map(t => `${t.type} ₦${t.amount}`).join(', ') || 
       return res.json({
         message: aiResponse,
         balance: user.balance,
-        speak: aiResponse.substring(0, 250),
-        isAiAdvice: true
+        speak: aiResponse.substring(0, 250).replace(/[ẹọṣí]/gi, (match) => {
+          const map = {'ẹ': 'e', 'ọ': 'o', 'ṣ': 's', 'í': 'i'};
+          return map[match] || match;
+        }),
+        isAiAdvice: true,
+        language: detectedLang
       });
     }
 
