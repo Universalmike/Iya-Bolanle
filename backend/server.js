@@ -16,7 +16,7 @@ const pool = new Pool({
 
 // Gemini API configuration
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
 
 // Test connection
 pool.query('SELECT NOW()', (err, res) => {
@@ -94,21 +94,62 @@ const createTables = async () => {
 
 createTables();
 
+// --------- Helper: Remove Accents/Diacritics ----------
+const removeAccents = (text) => {
+  const accentMap = {
+    // Yoruba characters
+    'ẹ': 'e', 'Ẹ': 'E',
+    'ọ': 'o', 'Ọ': 'O',
+    'ṣ': 's', 'Ṣ': 'S',
+    'á': 'a', 'Á': 'A',
+    'à': 'a', 'À': 'A',
+    'é': 'e', 'É': 'E',
+    'è': 'e', 'È': 'E',
+    'ẹ́': 'e', 'Ẹ́': 'E',
+    'ẹ̀': 'e', 'Ẹ̀': 'E',
+    'í': 'i', 'Í': 'I',
+    'ì': 'i', 'Ì': 'I',
+    'ó': 'o', 'Ó': 'O',
+    'ò': 'o', 'Ò': 'O',
+    'ọ́': 'o', 'Ọ́': 'O',
+    'ọ̀': 'o', 'Ọ̀': 'O',
+    'ú': 'u', 'Ú': 'U',
+    'ù': 'u', 'Ù': 'U',
+    // Igbo characters
+    'ị': 'i', 'Ị': 'I',
+    'ụ': 'u', 'Ụ': 'U',
+    'ṅ': 'n', 'Ṅ': 'N',
+    'ń': 'n', 'Ń': 'N',
+    'ǹ': 'n', 'Ǹ': 'N',
+    // Hausa characters
+    'ɓ': 'b', 'Ɓ': 'B',
+    'ɗ': 'd', 'Ɗ': 'D',
+    'ƙ': 'k', 'Ƙ': 'K',
+    'ƴ': 'y', 'Ƴ': 'Y',
+    ''': "'", ''': "'"
+  };
+  
+  return text.replace(/[ẹẸọỌṣṢáÁàÀéÉèÈẹ́Ẹ́ẹ̀Ẹ̀íÍìÌóÓòÒọ́Ọ́ọ̀Ọ̀úÚùÙịỊụỤṅṄńŃǹǸɓƁɗƊƙƘƴƳ'']/g, 
+    char => accentMap[char] || char
+  );
+};
+
 // --------- Language Detection ----------
 const languagePatterns = {
   pidgin: /\b(wetin|dey|abeg|una|abi|no wahala|how far|wan|make we|na so|wahala|oga|sabi|chop|belle|fit|don|go|come|talk|see|wey|dem|im|e don|no be)\b/i,
-  yoruba: /\b(bawo|ẹ ku|e ku|pele|o dabo|dabo|se|owo|mo|ni|ti|ko|wa|daadaa|ẹ se|e se|wo|mi|fun|re|ninu|apo|miiran)\b/i,
-  igbo: /\b(kedu|ndewo|biko|unu|nna|nwanne|nnoo|bia|gaa|mma|daalu|daalụ|meela|lelee|ego|di|ugbu|bu|nwere|ihe|ozo|choro|foduru)\b/i,
-  hausa: /\b(sannu|yaya|lafiya|na gode|gode|sai|barka|kuma|ina|kai|ke|dan|yar|wallahi|duba|kudin|kuɗin|kake|shine|kana|bukatar|wani|abu)\b/i
+  yoruba: /\b(bawo|e ku|eku|pele|o dabo|dabo|odabo|se|owo|mo|ni|ti|ko|wa|daadaa|e se|ese|wo|mi|fun|re|ninu|apo|miiran|san|ra|fi|ranise)\b/i,
+  igbo: /\b(kedu|ndewo|biko|unu|nna|nwanne|nnoo|bia|gaa|mma|daalu|meela|lelee|ego|di|ugbu|bu|nwere|ihe|ozo|choro|foduru|zuta|zigara)\b/i,
+  hausa: /\b(sannu|yaya|lafiya|na gode|gode|sai|barka|kuma|ina|kai|ke|dan|yar|wallahi|duba|kudin|kake|shine|kana|bukatar|wani|abu|sayi|tura)\b/i
 };
 
 const detectLanguage = (text) => {
-  const lowerText = text.toLowerCase();
+  // Remove accents for better detection
+  const cleanText = removeAccents(text.toLowerCase());
   
   // Count matches for each language
   const scores = {};
   for (const [lang, pattern] of Object.entries(languagePatterns)) {
-    const matches = lowerText.match(pattern);
+    const matches = cleanText.match(pattern);
     scores[lang] = matches ? matches.length : 0;
   }
   
@@ -123,6 +164,7 @@ const detectLanguage = (text) => {
     }
   }
   
+  console.log(`Language detection: "${text}" -> ${detectedLang} (score: ${maxScore})`);
   return detectedLang;
 };
 
@@ -137,21 +179,21 @@ const translations = {
   },
   airtimeSuccess: {
     english: (amount, newBal) => `Perfect! I've topped up ₦${amount.toLocaleString()} airtime for you. Your new balance is ₦${newBal.toLocaleString()}.`,
-    pidgin: (amount, newBal) => `Ehen! I don buy ₦${amount.toLocaleString()} airtime for you. Your new balance na ₦${newBal.toLocaleString()}.`,
+    pidgin: (amount, newBal) => `Ehen! I don buy ₦${amount.toLocaleString()} airtime for you o. Your new balance na ₦${newBal.toLocaleString()}.`,
     yoruba: (amount, newBal) => `O dara! Mo ti ra ₦${amount.toLocaleString()} airtime fun e. Owo re yi to ku ni ₦${newBal.toLocaleString()}.`,
     igbo: (amount, newBal) => `O di mma! Azutaala m ₦${amount.toLocaleString()} airtime maka gi. Ego gi foduru ugbu a bu ₦${newBal.toLocaleString()}.`,
     hausa: (amount, newBal) => `Na gode! Na saya ₦${amount.toLocaleString()} airtime. Sabon kudin ku shine ₦${newBal.toLocaleString()}.`
   },
   insufficientFunds: {
     english: (balance, amount) => `Sorry, you don't have enough funds. Your balance is ₦${balance.toLocaleString()} but you need ₦${amount.toLocaleString()}.`,
-    pidgin: (balance, amount) => `Sorry, your money no reach. You get ₦${balance.toLocaleString()} but you need ₦${amount.toLocaleString()}.`,
+    pidgin: (balance, amount) => `Sorry o, your money no reach. You get ₦${balance.toLocaleString()} but you need ₦${amount.toLocaleString()}.`,
     yoruba: (balance, amount) => `Ma binu, owo re ko to. O ni ₦${balance.toLocaleString()} sugbon o nilo ₦${amount.toLocaleString()}.`,
     igbo: (balance, amount) => `Ndo, ego gi erughi. I nwere ₦${balance.toLocaleString()} mana i choro ₦${amount.toLocaleString()}.`,
     hausa: (balance, amount) => `Yi hakuri, kudin ku bai isa ba. Kuna da ₦${balance.toLocaleString()} amma kuna bukatar ₦${amount.toLocaleString()}.`
   },
   transferSuccess: {
     english: (amount, recipient, newBal) => `All done! ₦${amount.toLocaleString()} has been sent to ${recipient}. Your new balance is ₦${newBal.toLocaleString()}.`,
-    pidgin: (amount, recipient, newBal) => `E don do! I don send ₦${amount.toLocaleString()} give ${recipient}. Your new balance na ₦${newBal.toLocaleString()}.`,
+    pidgin: (amount, recipient, newBal) => `E don do! I don send ₦${amount.toLocaleString()} give ${recipient} o. Your new balance na ₦${newBal.toLocaleString()}.`,
     yoruba: (amount, recipient, newBal) => `O tan! A ti fi ₦${amount.toLocaleString()} ranise si ${recipient}. Owo re yi to ku ni ₦${newBal.toLocaleString()}.`,
     igbo: (amount, recipient, newBal) => `O gwula! Ezigala m ₦${amount.toLocaleString()} nye ${recipient}. Ego gi foduru ugbu a bu ₦${newBal.toLocaleString()}.`,
     hausa: (amount, recipient, newBal) => `An gama! An aika ₦${amount.toLocaleString()} zuwa ga ${recipient}. Sabon kudin ku shine ₦${newBal.toLocaleString()}.`
@@ -312,13 +354,12 @@ app.post("/action", async (req, res) => {
     if (/balance|wetin.*balance|owo.*mi|wo.*owo|ego.*m|lelee.*ego|kudin|duba.*kudin/i.test(lowerText)) {
       console.log(`Balance check - Detected language: ${detectedLang}`);
       const message = translations.balance[detectedLang](username, user.balance);
+      const cleanMessage = removeAccents(message);
+      
       return res.json({ 
         message: message,
         balance: user.balance,
-        speak: message.replace(/₦/g, 'Naira ').replace(/[ẹọṣí]/gi, (match) => {
-          const map = {'ẹ': 'e', 'ọ': 'o', 'ṣ': 's', 'í': 'i', 'Ẹ': 'E', 'Ọ': 'O', 'Ṣ': 'S', 'Í': 'I'};
-          return map[match] || match;
-        }),
+        speak: cleanMessage.replace(/₦/g, 'Naira '),
         language: detectedLang
       });
     }
@@ -348,10 +389,12 @@ app.post("/action", async (req, res) => {
       );
 
       const message = translations.airtimeSuccess[detectedLang](amount, newBal);
+      const cleanMessage = removeAccents(message);
+      
       return res.json({ 
         message: message,
         balance: newBal,
-        speak: message.replace(/₦/g, 'Naira ')
+        speak: cleanMessage.replace(/₦/g, 'Naira ')
       });
     }
 
@@ -405,10 +448,12 @@ app.post("/action", async (req, res) => {
       );
 
       const message = translations.transferSuccess[detectedLang](amount, recipient, newSenderBal);
+      const cleanMessage = removeAccents(message);
+      
       return res.json({
         message: message,
         balance: newSenderBal,
-        speak: message.replace(/₦/g, 'Naira ')
+        speak: cleanMessage.replace(/₦/g, 'Naira ')
       });
     }
 
@@ -431,14 +476,12 @@ Language preference: ${detectedLang}
       `.trim();
 
       const aiResponse = await getGeminiAdvice(text, userContext, detectedLang);
+      const cleanResponse = removeAccents(aiResponse);
       
       return res.json({
         message: aiResponse,
         balance: user.balance,
-        speak: aiResponse.substring(0, 250).replace(/[ẹọṣí]/gi, (match) => {
-          const map = {'ẹ': 'e', 'ọ': 'o', 'ṣ': 's', 'í': 'i'};
-          return map[match] || match;
-        }),
+        speak: cleanResponse.substring(0, 250),
         isAiAdvice: true,
         language: detectedLang
       });
