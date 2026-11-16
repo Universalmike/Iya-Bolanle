@@ -11,6 +11,8 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
+  // True while SARA is waiting for "yes"/"no" on a transfer or airtime purchase
+  const [awaitingConfirm, setAwaitingConfirm] = useState(false);
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const chatEndRef = useRef(null);
@@ -262,6 +264,7 @@ export default function App() {
       const res = await axios.post(`${API_URL}/action`, { username, text });
       const reply = res.data.message;
       setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
+      setAwaitingConfirm(Boolean(res.data.awaitingConfirmation));
       
       // Use the speak version if available, otherwise clean the message
       const speechText = res.data.speak || reply;
@@ -269,6 +272,7 @@ export default function App() {
     } catch (err) {
       const errorMsg = err.response?.data?.message || "Sorry, something went wrong. Please try again.";
       setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
+      setAwaitingConfirm(false);
       speakText(errorMsg);
     } finally {
       setIsThinking(false);
@@ -394,6 +398,7 @@ export default function App() {
               onClick={() => {
                 setIsLoggedIn(false);
                 setMessages([]);
+                setAwaitingConfirm(false);
                 setUsername("");
                 setPassword("");
                 setShowEsusu(false);
@@ -445,6 +450,25 @@ export default function App() {
               )}
               <div ref={chatEndRef} />
             </div>
+
+            {awaitingConfirm && (
+              <div style={styles.confirmBar}>
+                <button
+                  onClick={() => handleSend("yes")}
+                  style={styles.confirmYes}
+                  disabled={isThinking}
+                >
+                  ✅ Yes, confirm
+                </button>
+                <button
+                  onClick={() => handleSend("no")}
+                  style={styles.confirmNo}
+                  disabled={isThinking}
+                >
+                  ❌ No, cancel
+                </button>
+              </div>
+            )}
 
             <div style={styles.quickActions}>
               <button 
@@ -874,6 +898,33 @@ const styles = {
     lineHeight: 1.5, 
     whiteSpace: "pre-wrap",
     boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+  },
+  confirmBar: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 12,
+  },
+  confirmYes: {
+    flex: 1,
+    padding: "12px 16px",
+    borderRadius: 10,
+    border: "none",
+    background: "#10b981",
+    color: "#fff",
+    cursor: "pointer",
+    fontWeight: 600,
+    fontSize: 15,
+  },
+  confirmNo: {
+    flex: 1,
+    padding: "12px 16px",
+    borderRadius: 10,
+    border: "1px solid rgba(239,68,68,0.4)",
+    background: "rgba(239,68,68,0.1)",
+    color: "#f87171",
+    cursor: "pointer",
+    fontWeight: 600,
+    fontSize: 15,
   },
   quickActions: {
     display: "flex",

@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import pkg from 'pg';
+import { parseIntent, parseConfirmation, detectLanguage, removeAccents } from "./nlu.js";
+import { t, naira } from "./messages.js";
 const { Pool } = pkg;
 
 const app = express();
@@ -14,9 +16,19 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Gemini API configuration
+// Gemini API configuration. Override GEMINI_MODEL if Google retires this model.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const geminiOpts = { apiKey: GEMINI_API_KEY, model: GEMINI_MODEL };
+
+// Limits for money-moving actions (naira)
+const LIMITS = {
+  airtime: { min: 50, max: 50_000 },
+  transfer: { min: 10, max: 1_000_000 },
+};
+// How long a "Send ₦X to Y?" prompt stays valid
+const PENDING_TTL_SECONDS = 120;
 
 // Test connection
 pool.query('SELECT NOW()', (err, res) => {
@@ -86,6 +98,17 @@ const createTables = async () => {
       )
     `);
 
+    // One unconfirmed money action per user, waiting for "yes"/"no".
+    // Stored in the DB (not memory) so it survives restarts and multiple instances.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pending_actions (
+        username TEXT PRIMARY KEY,
+        action JSONB NOT NULL,
+        language TEXT NOT NULL DEFAULT 'english',
+        expires_at TIMESTAMP NOT NULL
+      )
+    `);
+
     console.log('All tables created successfully');
   } catch (err) {
     console.error('Error creating tables:', err);
@@ -94,109 +117,137 @@ const createTables = async () => {
 
 createTables();
 
-// --------- Helper: Remove Accents/Diacritics ----------
-const removeAccents = (text) => {
-  const accentMap = {
-    // Yoruba characters
-    'ẹ': 'e', 'Ẹ': 'E',
-    'ọ': 'o', 'Ọ': 'O',
-    'ṣ': 's', 'Ṣ': 'S',
-    'á': 'a', 'Á': 'A',
-    'à': 'a', 'À': 'A',
-    'é': 'e', 'É': 'E',
-    'è': 'e', 'È': 'E',
-    'ẹ́': 'e', 'Ẹ́': 'E',
-    'ẹ̀': 'e', 'Ẹ̀': 'E',
-    'í': 'i', 'Í': 'I',
-    'ì': 'i', 'Ì': 'I',
-    'ó': 'o', 'Ó': 'O',
-    'ò': 'o', 'Ò': 'O',
-    'ọ́': 'o', 'Ọ́': 'O',
-    'ọ̀': 'o', 'Ọ̀': 'O',
-    'ú': 'u', 'Ú': 'U',
-    'ù': 'u', 'Ù': 'U',
-    // Igbo characters
-    'ị': 'i', 'Ị': 'I',
-    'ụ': 'u', 'Ụ': 'U',
-    'ṅ': 'n', 'Ṅ': 'N',
-    'ń': 'n', 'Ń': 'N',
-    'ǹ': 'n', 'Ǹ': 'N',
-    // Hausa characters
-    'ɓ': 'b', 'Ɓ': 'B',
-    'ɗ': 'd', 'Ɗ': 'D',
-    'ƙ': 'k', 'Ƙ': 'K',
-    'ƴ': 'y', 'Ƴ': 'Y',
-  };
-  
-  return text.replace(/[ẹẸọỌṣṢáÁàÀéÉèÈẹ́Ẹ́ẹ̀Ẹ̀íÍìÌóÓòÒọ́Ọ́ọ̀Ọ̀úÚùÙịỊụỤṅṄńŃǹǸɓƁɗƊƙƘƴƳ'']/g, 
-    char => accentMap[char] || char
+// --------- Helpers ----------
+const toSpeech = (text, maxLen = 300) => {
+  let speech = removeAccents(text).replace(/₦/g, 'Naira ');
+  if (speech.length > maxLen) {
+    // Cut at the last sentence end that fits, so speech doesn't stop mid-word.
+    const cut = speech.slice(0, maxLen);
+    const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+    speech = end > 0 ? cut.slice(0, end + 1) : cut;
+  }
+  return speech;
+};
+
+// Exact username first; otherwise a case-insensitive match if it is unambiguous.
+const findUser = async (name, db = pool) => {
+  const exact = await db.query("SELECT * FROM users WHERE username=$1", [name]);
+  if (exact.rows.length) return exact.rows[0];
+  const loose = await db.query("SELECT * FROM users WHERE LOWER(username)=LOWER($1)", [name]);
+  return loose.rows.length === 1 ? loose.rows[0] : null;
+};
+
+const savePendingAction = (username, action, language) =>
+  pool.query(
+    `INSERT INTO pending_actions (username, action, language, expires_at)
+     VALUES ($1, $2, $3, NOW() + make_interval(secs => $4))
+     ON CONFLICT (username) DO UPDATE
+       SET action = EXCLUDED.action, language = EXCLUDED.language, expires_at = EXCLUDED.expires_at`,
+    [username, action, language, PENDING_TTL_SECONDS]
   );
+
+// Removes and returns the pending action in one statement, so a double "yes"
+// (e.g. two quick taps) can only ever execute it once.
+const takePendingAction = async (username) => {
+  const result = await pool.query(
+    `DELETE FROM pending_actions WHERE username=$1
+     RETURNING action, language, (expires_at > NOW()) AS valid`,
+    [username]
+  );
+  return result.rows[0] ?? null;
 };
 
-// --------- Language Detection ----------
-const languagePatterns = {
-  pidgin: /\b(wetin|dey|abeg|una|abi|no wahala|how far|wan|make we|na so|wahala|oga|sabi|chop|belle|fit|don|go|come|talk|see|wey|dem|im|e don|no be)\b/i,
-  yoruba: /\b(bawo|e ku|eku|pele|o dabo|dabo|odabo|se|owo|mo|ni|ti|ko|wa|daadaa|e se|ese|wo|mi|fun|re|ninu|apo|miiran|san|ra|fi|ranise)\b/i,
-  igbo: /\b(kedu|ndewo|biko|unu|nna|nwanne|nnoo|bia|gaa|mma|daalu|meela|lelee|ego|di|ugbu|bu|nwere|ihe|ozo|choro|foduru|zuta|zigara)\b/i,
-  hausa: /\b(sannu|yaya|lafiya|na gode|gode|sai|barka|kuma|ina|kai|ke|dan|yar|wallahi|duba|kudin|kake|shine|kana|bukatar|wani|abu|sayi|tura)\b/i
+const clearPendingAction = (username) =>
+  pool.query("DELETE FROM pending_actions WHERE username=$1", [username]);
+
+const checkLimits = (type, amount, lang) => {
+  const { min, max } = LIMITS[type];
+  if (amount < min) return t("amountTooSmall", lang, min);
+  if (amount > max) return t("amountTooLarge", lang, max);
+  return null;
 };
 
-const detectLanguage = (text) => {
-  // Remove accents for better detection
-  const cleanText = removeAccents(text.toLowerCase());
-  
-  // Count matches for each language
-  const scores = {};
-  for (const [lang, pattern] of Object.entries(languagePatterns)) {
-    const matches = cleanText.match(pattern);
-    scores[lang] = matches ? matches.length : 0;
+// Runs fn inside a DB transaction. Balance updates use
+// "balance = balance - $x WHERE balance >= $x" so concurrent requests can't overspend.
+const withTransaction = async (fn) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query(result?.ok === false ? "ROLLBACK" : "COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
   }
-  
-  // Find language with highest score
-  let maxScore = 0;
-  let detectedLang = 'english';
-  
-  for (const [lang, score] of Object.entries(scores)) {
-    if (score > maxScore) {
-      maxScore = score;
-      detectedLang = lang;
+};
+
+const executeTransfer = (username, { amount, recipient }, lang) =>
+  withTransaction(async (db) => {
+    if (recipient === username) return { ok: false, message: t("selfTransfer", lang) };
+
+    const debit = await db.query(
+      "UPDATE users SET balance = balance - $1 WHERE username=$2 AND balance >= $1 RETURNING balance",
+      [amount, username]
+    );
+    if (debit.rowCount === 0) {
+      const { rows } = await db.query("SELECT balance FROM users WHERE username=$1", [username]);
+      return { ok: false, message: t("insufficientFunds", lang, rows[0]?.balance ?? 0, amount) };
     }
-  }
-  
-  console.log(`Language detection: "${text}" -> ${detectedLang} (score: ${maxScore})`);
-  return detectedLang;
-};
 
-// --------- Translations ----------
-const translations = {
-  balance: {
-    english: (name, balance) => `Hey ${name}! Your current balance is ₦${balance.toLocaleString()}. Need anything else?`,
-    pidgin: (name, balance) => `Oga ${name}! Your money balance na ₦${balance.toLocaleString()} o. Wetin you wan do again?`,
-    yoruba: (name, balance) => `E ku ise ${name}! Owo to wa ninu apo re yi je ₦${balance.toLocaleString()}. Se mo le se ohun miiran fun e?`,
-    igbo: (name, balance) => `Ndewo ${name}! Ego gi di ugbu a bu ₦${balance.toLocaleString()}. O nwere ihe ozo i choro?`,
-    hausa: (name, balance) => `Sannu ${name}! Kudin da kake da shi yanzu shine ₦${balance.toLocaleString()}. Kana bukatar wani abu?`
-  },
-  airtimeSuccess: {
-    english: (amount, newBal) => `Perfect! I've topped up ₦${amount.toLocaleString()} airtime for you. Your new balance is ₦${newBal.toLocaleString()}.`,
-    pidgin: (amount, newBal) => `Ehen! I don buy ₦${amount.toLocaleString()} airtime for you o. Your new balance na ₦${newBal.toLocaleString()}.`,
-    yoruba: (amount, newBal) => `O dara! Mo ti ra ₦${amount.toLocaleString()} airtime fun e. Owo re yi to ku ni ₦${newBal.toLocaleString()}.`,
-    igbo: (amount, newBal) => `O di mma! Azutaala m ₦${amount.toLocaleString()} airtime maka gi. Ego gi foduru ugbu a bu ₦${newBal.toLocaleString()}.`,
-    hausa: (amount, newBal) => `Na gode! Na saya ₦${amount.toLocaleString()} airtime. Sabon kudin ku shine ₦${newBal.toLocaleString()}.`
-  },
-  insufficientFunds: {
-    english: (balance, amount) => `Sorry, you don't have enough funds. Your balance is ₦${balance.toLocaleString()} but you need ₦${amount.toLocaleString()}.`,
-    pidgin: (balance, amount) => `Sorry o, your money no reach. You get ₦${balance.toLocaleString()} but you need ₦${amount.toLocaleString()}.`,
-    yoruba: (balance, amount) => `Ma binu, owo re ko to. O ni ₦${balance.toLocaleString()} sugbon o nilo ₦${amount.toLocaleString()}.`,
-    igbo: (balance, amount) => `Ndo, ego gi erughi. I nwere ₦${balance.toLocaleString()} mana i choro ₦${amount.toLocaleString()}.`,
-    hausa: (balance, amount) => `Yi hakuri, kudin ku bai isa ba. Kuna da ₦${balance.toLocaleString()} amma kuna bukatar ₦${amount.toLocaleString()}.`
-  },
-  transferSuccess: {
-    english: (amount, recipient, newBal) => `All done! ₦${amount.toLocaleString()} has been sent to ${recipient}. Your new balance is ₦${newBal.toLocaleString()}.`,
-    pidgin: (amount, recipient, newBal) => `E don do! I don send ₦${amount.toLocaleString()} give ${recipient} o. Your new balance na ₦${newBal.toLocaleString()}.`,
-    yoruba: (amount, recipient, newBal) => `O tan! A ti fi ₦${amount.toLocaleString()} ranise si ${recipient}. Owo re yi to ku ni ₦${newBal.toLocaleString()}.`,
-    igbo: (amount, recipient, newBal) => `O gwula! Ezigala m ₦${amount.toLocaleString()} nye ${recipient}. Ego gi foduru ugbu a bu ₦${newBal.toLocaleString()}.`,
-    hausa: (amount, recipient, newBal) => `An gama! An aika ₦${amount.toLocaleString()} zuwa ga ${recipient}. Sabon kudin ku shine ₦${newBal.toLocaleString()}.`
-  }
+    const credit = await db.query(
+      "UPDATE users SET balance = balance + $1 WHERE username=$2 RETURNING username",
+      [amount, recipient]
+    );
+    if (credit.rowCount === 0) return { ok: false, message: t("recipientNotFound", lang, recipient) };
+
+    await db.query(
+      "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, 'Transfer', $2, $3), ($3, 'Received', $2, $1)",
+      [username, amount, recipient]
+    );
+
+    const balance = debit.rows[0].balance;
+    return { ok: true, balance, message: t("transferSuccess", lang, amount, recipient, balance) };
+  });
+
+// NOTE: airtime is still simulated; no telco/payment provider is called yet.
+const executeAirtime = (username, { amount, phone }, lang) =>
+  withTransaction(async (db) => {
+    const debit = await db.query(
+      "UPDATE users SET balance = balance - $1 WHERE username=$2 AND balance >= $1 RETURNING balance",
+      [amount, username]
+    );
+    if (debit.rowCount === 0) {
+      const { rows } = await db.query("SELECT balance FROM users WHERE username=$1", [username]);
+      return { ok: false, message: t("insufficientFunds", lang, rows[0]?.balance ?? 0, amount) };
+    }
+
+    await db.query(
+      "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, 'Airtime', $2, $3)",
+      [username, amount, phone || "Self"]
+    );
+
+    const balance = debit.rows[0].balance;
+    return { ok: true, balance, message: t("airtimeSuccess", lang, amount, balance) };
+  });
+
+const executors = { transfer: executeTransfer, airtime: executeAirtime };
+
+const HISTORY_ICONS = { Airtime: "📱", Transfer: "💸", Received: "💰", "Bill Payment": "🧾", "Esusu Contribution": "🤝" };
+
+const formatHistory = (rows, lang) => {
+  if (!rows.length) return t("historyEmpty", lang);
+  const lines = rows.map((tx) => {
+    const date = new Date(tx.date).toLocaleString("en-NG", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const icon = HISTORY_ICONS[tx.type] || "💳";
+    let party = "";
+    if (tx.type === "Received") party = ` ← ${tx.to_user}`;
+    else if (tx.to_user && tx.to_user !== "Self") party = ` → ${tx.to_user}`;
+    return `${icon} ${date} — ${tx.type} ${naira(tx.amount)}${party}`;
+  });
+  return `${t("historyHeader", lang)}\n\n${lines.join("\n")}`;
 };
 
 // --------- Gemini AI Function ----------
@@ -237,24 +288,24 @@ Give advice on:
 - Budgeting tips
 - Nigerian banks and financial products
 
+You cannot move money in this reply. If the user seems to want a payment, tell them the exact phrase to use, e.g. "send 1000 to john" or "buy 200 airtime".
+
 Keep response:
 - Very brief (2-3 short sentences)
 - Practical and actionable
 - Specific to Nigeria
 - Friendly and conversational`;
 
-    const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+    const response = await fetch(GEMINI_API_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
       body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: `${systemPrompt}\n\nUser question: ${userQuery}\n\nRespond now:`
-          }]
-        }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: userQuery }] }],
         generationConfig: {
           temperature: 0.9,
-          maxOutputTokens: 300,
+          // Newer Gemini models spend part of this budget "thinking", so leave headroom.
+          maxOutputTokens: 1024,
           topP: 0.95,
         }
       })
@@ -265,11 +316,12 @@ Keep response:
     }
 
     const data = await response.json();
-    
-    if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
-      return data.candidates[0].content.parts[0].text.trim();
+    const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
+
+    if (text) {
+      return text;
     }
-    
+
     return "I'm having trouble thinking right now. Please try asking again!";
   } catch (error) {
     console.error("Gemini error:", error);
@@ -290,9 +342,9 @@ app.post("/signup", async (req, res) => {
   if (!username || !password) {
     return res.status(400).json({ message: "Username and password required" });
   }
-  
+
   const hashed = bcrypt.hashSync(password, 10);
-  
+
   try {
     await pool.query(
       "INSERT INTO users(username, password) VALUES($1, $2)",
@@ -306,22 +358,22 @@ app.post("/signup", async (req, res) => {
 
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
-  
+
   try {
     const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
-    
+
     if (result.rows.length === 0) {
       return res.status(400).json({ message: "Invalid username or password" });
     }
-    
+
     const user = result.rows[0];
-    
+
     if (!bcrypt.compareSync(password, user.password)) {
       return res.status(400).json({ message: "Invalid username or password" });
     }
-    
-    res.json({ 
-      balance: user.balance, 
+
+    res.json({
+      balance: user.balance,
       message: "Login successful",
       welcomeMessage: `Hi ${username}! I'm SARA. I speak English, Pidgin, Yoruba, Igbo, and Hausa. I can help with payments, savings, and financial advice!`
     });
@@ -332,165 +384,115 @@ app.post("/login", async (req, res) => {
 });
 
 // --------- Main Action Endpoint ----------
+// Flow: (1) if the message is a yes/no, resolve the pending action;
+// (2) otherwise parse intent (Gemini, regex fallback); (3) money-moving intents
+// are never executed directly — they create a pending action and ask to confirm.
 app.post("/action", async (req, res) => {
   const { username, text } = req.body;
-  if (!username || !text) {
+  if (!username || typeof text !== "string" || !text.trim()) {
     return res.status(400).json({ message: "Missing parameters" });
   }
 
   try {
-    const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
-    
-    if (result.rows.length === 0) {
+    const user = (await pool.query("SELECT * FROM users WHERE username=$1", [username])).rows[0];
+    if (!user) {
       return res.status(400).json({ message: "User not found" });
     }
-    
-    const user = result.rows[0];
-    const detectedLang = detectLanguage(text);
-    const lowerText = text.toLowerCase();
 
-    // Check balance
-    if (/balance|wetin.*balance|owo.*mi|wo.*owo|ego.*m|lelee.*ego|kudin|duba.*kudin/i.test(lowerText)) {
-      console.log(`Balance check - Detected language: ${detectedLang}`);
-      const message = translations.balance[detectedLang](username, user.balance);
-      const cleanMessage = removeAccents(message);
-      
-      return res.json({ 
-        message: message,
-        balance: user.balance,
-        speak: cleanMessage.replace(/₦/g, 'Naira '),
-        language: detectedLang
-      });
+    const reply = (language, message, extra = {}) =>
+      res.json({ message, speak: toSpeech(message), language, balance: user.balance, ...extra });
+
+    // 1. Yes / no to a pending confirmation
+    const answer = parseConfirmation(text);
+    if (answer) {
+      const pending = await takePendingAction(username);
+      if (!pending) {
+        const lang = detectLanguage(text);
+        return reply(lang, t("nothingToConfirm", lang));
+      }
+      const lang = pending.language;
+      if (!pending.valid) return reply(lang, t("expired", lang));
+      if (answer === "no") return reply(lang, t("cancelled", lang));
+
+      const result = await executors[pending.action.type](username, pending.action, lang);
+      return reply(lang, result.message, result.ok ? { balance: result.balance } : {});
     }
 
-    // Buy airtime
-    if (/airtime|recharge|top.?up|buy.*airtime/i.test(lowerText)) {
-      const match = lowerText.match(/(\d+)/);
-      const amount = match ? parseInt(match[0]) : 0;
-      
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ 
-          message: "Please specify amount. Example: 'buy 100 airtime'"
-        });
-      }
-      
-      if (user.balance < amount) {
-        const message = translations.insufficientFunds[detectedLang](user.balance, amount);
-        return res.status(400).json({ message: message });
-      }
+    // Any other message drops an earlier unconfirmed request.
+    await clearPendingAction(username);
 
-      const newBal = user.balance - amount;
-      
-      await pool.query("UPDATE users SET balance=$1 WHERE username=$2", [newBal, username]);
-      await pool.query(
-        "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
-        [username, "Airtime", amount, "Self"]
-      );
+    // 2. Understand the message
+    const parsed = await parseIntent(text, geminiOpts);
+    const lang = parsed.language;
+    console.log(`Intent (${parsed.source}):`, JSON.stringify(parsed));
 
-      const message = translations.airtimeSuccess[detectedLang](amount, newBal);
-      const cleanMessage = removeAccents(message);
-      
-      return res.json({ 
-        message: message,
-        balance: newBal,
-        speak: cleanMessage.replace(/₦/g, 'Naira ')
-      });
-    }
+    switch (parsed.intent) {
+      case "balance":
+        return reply(lang, t("balance", lang, username, user.balance));
 
-    // Transfer money
-    if (/transfer|send|pay|fi.*owo|zigara|tura/i.test(lowerText)) {
-      const match = lowerText.match(/(\d+)/);
-      const amount = match ? parseInt(match[0]) : 0;
-      const recipientMatch = lowerText.match(/to (\w+)|give (\w+)|si (\w+)|nye (\w+)|ga (\w+)/i);
-      const recipient = recipientMatch ? (recipientMatch[1] || recipientMatch[2] || recipientMatch[3] || recipientMatch[4] || recipientMatch[5]) : null;
+      case "transfer": {
+        const { amount, recipient } = parsed;
+        if (!recipient) return reply(lang, t("askRecipient", lang));
+        if (!amount) return reply(lang, t("askTransferAmount", lang, recipient));
+        const limitError = checkLimits("transfer", amount, lang);
+        if (limitError) return reply(lang, limitError);
 
-      if (!recipient) {
-        return res.status(400).json({ 
-          message: "Who do you want to send money to? Example: 'send 1000 to john'"
-        });
-      }
-      
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ 
-          message: "Please specify the amount to send."
-        });
-      }
-      
-      if (user.balance < amount) {
-        const message = translations.insufficientFunds[detectedLang](user.balance, amount);
-        return res.status(400).json({ message: message });
+        const recipientUser = await findUser(recipient);
+        if (!recipientUser) return reply(lang, t("recipientNotFound", lang, recipient));
+        if (recipientUser.id === user.id) return reply(lang, t("selfTransfer", lang));
+        if (user.balance < amount) return reply(lang, t("insufficientFunds", lang, user.balance, amount));
+
+        const action = { type: "transfer", amount, recipient: recipientUser.username };
+        await savePendingAction(username, action, lang);
+        return reply(lang, t("confirmTransfer", lang, amount, recipientUser.username), { awaitingConfirmation: true, pendingAction: action });
       }
 
-      const recResult = await pool.query("SELECT * FROM users WHERE username=$1", [recipient]);
-      
-      if (recResult.rows.length === 0) {
-        return res.status(400).json({ 
-          message: `User '${recipient}' not found. Check the username.`
-        });
+      case "airtime": {
+        const { amount, phone } = parsed;
+        if (!amount) return reply(lang, t("askAirtimeAmount", lang));
+        const limitError = checkLimits("airtime", amount, lang);
+        if (limitError) return reply(lang, limitError);
+        if (user.balance < amount) return reply(lang, t("insufficientFunds", lang, user.balance, amount));
+
+        const action = { type: "airtime", amount, phone };
+        await savePendingAction(username, action, lang);
+        return reply(lang, t("confirmAirtime", lang, amount, phone), { awaitingConfirmation: true, pendingAction: action });
       }
 
-      const recUser = recResult.rows[0];
-      const newSenderBal = user.balance - amount;
-      const newRecipientBal = recUser.balance + amount;
+      case "history": {
+        const { rows } = await pool.query(
+          "SELECT * FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 10",
+          [username]
+        );
+        const message = formatHistory(rows, lang);
+        return res.json({ message, speak: toSpeech(t(rows.length ? "historyHeader" : "historyEmpty", lang)), language: lang, balance: user.balance });
+      }
 
-      await pool.query("UPDATE users SET balance=$1 WHERE username=$2", [newSenderBal, username]);
-      await pool.query("UPDATE users SET balance=$1 WHERE username=$2", [newRecipientBal, recipient]);
-      
-      await pool.query(
-        "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
-        [username, "Transfer", amount, recipient]
-      );
-      
-      await pool.query(
-        "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
-        [recipient, "Received", amount, username]
-      );
+      case "greeting":
+        return reply(lang, t("greeting", lang, username));
 
-      const message = translations.transferSuccess[detectedLang](amount, recipient, newSenderBal);
-      const cleanMessage = removeAccents(message);
-      
-      return res.json({
-        message: message,
-        balance: newSenderBal,
-        speak: cleanMessage.replace(/₦/g, 'Naira ')
-      });
-    }
+      case "help":
+        return reply(lang, t("help", lang));
 
-    // AI Financial Advice
-    if (/advice|tip|invest|investment|save|saving|budget|plan|suggest|recommendation|recommend|help.*money|guide|what.*should|how.*can|wetin.*fit|what.*make|how.*take/i.test(lowerText) && 
-        !/balance|airtime|transfer|send|pay/i.test(lowerText)) {
-      
-      console.log(`AI Advice request - Language: ${detectedLang}`);
-      
-      const historyResult = await pool.query(
-        "SELECT type, amount FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 5",
-        [username]
-      );
-      
-      const userContext = `
+      // "advice" and anything unrecognised go to the AI instead of a canned reply.
+      default: {
+        if (!GEMINI_API_KEY && parsed.intent !== "advice") return reply(lang, t("help", lang));
+
+        const historyResult = await pool.query(
+          "SELECT type, amount FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 5",
+          [username]
+        );
+        const userContext = `
 User: ${username}
-Balance: ₦${user.balance.toLocaleString()}
-Recent transactions: ${historyResult.rows.map(t => `${t.type} ₦${t.amount}`).join(', ') || 'No recent transactions'}
-Language preference: ${detectedLang}
-      `.trim();
+Balance: ${naira(user.balance)}
+Recent transactions: ${historyResult.rows.map(tx => `${tx.type} ${naira(tx.amount)}`).join(', ') || 'No recent transactions'}
+Language preference: ${lang}
+        `.trim();
 
-      const aiResponse = await getGeminiAdvice(text, userContext, detectedLang);
-      const cleanResponse = removeAccents(aiResponse);
-      
-      return res.json({
-        message: aiResponse,
-        balance: user.balance,
-        speak: cleanResponse.substring(0, 250),
-        isAiAdvice: true,
-        language: detectedLang
-      });
+        const aiResponse = await getGeminiAdvice(text, userContext, lang);
+        return reply(lang, aiResponse, { isAiAdvice: true });
+      }
     }
-
-    // Default response
-    return res.json({ 
-      message: "I can help with: checking balance, buying airtime, transferring money, or giving financial advice. What do you need?"
-    });
-    
   } catch (err) {
     console.error("Action error:", err);
     res.status(500).json({ message: "Server error. Please try again." });
