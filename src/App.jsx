@@ -5,6 +5,34 @@ import {
   LANGUAGE_OPTIONS, SPEECH_CODES, languageLabel, ui, loadLanguageChoice, saveLanguageChoice,
 } from "./i18n";
 
+// Phone photos are often 3-10MB; shrink to a JPEG that is still sharp enough to read.
+// Falls back to the original file if the browser can't decode it (e.g. HEIC on Chrome).
+const shrinkImage = (file, maxSide = 1600, quality = 0.85) =>
+  new Promise((resolve, reject) => {
+    const readOriginal = () => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    };
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      readOriginal();
+    };
+    img.src = url;
+  });
+
 // Picks a browser voice for the language. Most browsers have no Yoruba, Igbo or
 // Hausa voice; then the (accent-stripped) text is read by a Nigerian/English voice.
 const pickVoice = (code) => {
@@ -42,6 +70,9 @@ export default function App() {
   const [showBillScanner, setShowBillScanner] = useState(false);
   const [scannedBill, setScannedBill] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
+  const [isPayingBill, setIsPayingBill] = useState(false);
+  const [billAmount, setBillAmount] = useState("");
+  const [billNotice, setBillNotice] = useState("");
   const fileInputRef = useRef(null);
 
   // Auto-scroll to bottom
@@ -153,6 +184,8 @@ export default function App() {
     setShowBillScanner(false);
     setEsusuGroups([]);
     setScannedBill(null);
+    setBillNotice("");
+    setBillAmount("");
   }, []);
 
   // Restore a saved session on page load (the token is checked by the server).
@@ -218,11 +251,12 @@ export default function App() {
   }, [isLoggedIn]);
 
   // ------------------------- Bill Scanner Functions -------------------------
+  // The server reads the photo with Gemini and stores the bill; we only send its id to pay.
   const handleImageUpload = async (event) => {
     const file = event.target.files[0];
+    event.target.value = ""; // lets the same photo be picked again after an error
     if (!file) return;
 
-    // Check if file is an image
     if (!file.type.startsWith('image/')) {
       alert(ui("notAnImage", language));
       return;
@@ -230,47 +264,41 @@ export default function App() {
 
     setIsScanning(true);
     setScannedBill(null);
-
-    // Convert to base64
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      try {
-        // Auto-detect bill type from filename or default to electricity
-        let billType = "electricity";
-        const filename = file.name.toLowerCase();
-        if (filename.includes('water')) billType = "water";
-        else if (filename.includes('internet') || filename.includes('wifi')) billType = "internet";
-        else if (filename.includes('cable') || filename.includes('dstv') || filename.includes('gotv')) billType = "cable";
-
-        const res = await api.post(`/scan-bill`, {
-          imageData: reader.result,
-          billType: billType
-        });
-
-        setScannedBill(res.data.billData);
-        showReply(res.data);
-      } catch (err) {
-        alert(err.response?.data?.message || ui("scanFailed", language));
-      } finally {
-        setIsScanning(false);
-      }
-    };
-    reader.readAsDataURL(file);
+    setBillNotice("");
+    try {
+      const imageData = await shrinkImage(file);
+      const res = await api.post(`/scan-bill`, { imageData });
+      setScannedBill(res.data.billData);
+      setBillAmount(res.data.billData.amount ? String(res.data.billData.amount) : "");
+      setBillNotice(res.data.message);
+      showReply(res.data);
+    } catch (err) {
+      const message = err.response?.data?.message || ui("scanFailed", language);
+      setBillNotice(message);
+      showReply(err.response?.data, message);
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   const handlePayBill = async () => {
-    if (!scannedBill) return;
-
+    if (!scannedBill || isPayingBill) return;
+    setIsPayingBill(true);
     try {
-      const res = await api.post(`/pay-bill`, {
-        billData: scannedBill
-      });
-
+      const amount = Number(billAmount.replace(/[₦,\s]/g, ""));
+      const res = await api.post(`/pay-bill`, { billId: scannedBill.id, amount: amount || null });
       showReply(res.data);
       setScannedBill(null);
+      setBillNotice("");
       setShowBillScanner(false);
     } catch (err) {
-      showReply(err.response?.data, ui("genericError", language));
+      const message = err.response?.data?.message || ui("genericError", language);
+      setBillNotice(message);
+      showReply(err.response?.data, message);
+      // Already paid or expired: this scan can't be used again.
+      if ([404, 409, 410].includes(err.response?.status)) setScannedBill(null);
+    } finally {
+      setIsPayingBill(false);
     }
   };
 
@@ -436,7 +464,8 @@ export default function App() {
               onClick={() => {
                 setShowEsusu(false);
                 setShowBillScanner(!showBillScanner);
-              }} 
+                setBillNotice("");
+              }}
               style={{
                 ...styles.esusuButton,
                 background: showBillScanner ? "#7c3aed" : "rgba(124,58,237,0.1)"
@@ -472,6 +501,10 @@ export default function App() {
             isScanning={isScanning}
             onPayBill={handlePayBill}
             fileInputRef={fileInputRef}
+            notice={billNotice}
+            amount={billAmount}
+            onAmountChange={setBillAmount}
+            isPaying={isPayingBill}
           />
         ) : showEsusu ? (
           <EsusuView groups={esusuGroups} onAction={esusuAction} styles={styles} />
@@ -595,7 +628,25 @@ export default function App() {
 }
 
 // ------------------------- Bill Scanner View Component -------------------------
-function BillScannerView({ onImageUpload, scannedBill, isScanning, onPayBill, fileInputRef }) {
+const BILL_ICONS = { electricity: "⚡", water: "💧", internet: "📡", cable: "📺", other: "🧾" };
+
+const formatBillDate = (iso) =>
+  new Date(`${iso}T00:00:00`).toLocaleDateString('en-NG', { year: 'numeric', month: 'long', day: 'numeric' });
+
+function BillScannerView({
+  onImageUpload, scannedBill, isScanning, onPayBill, fileInputRef, notice, amount, onAmountChange, isPaying,
+}) {
+  const amountValue = Number(String(amount).replace(/[₦,\s]/g, ""));
+  const canPay = Number.isFinite(amountValue) && amountValue > 0 && !isPaying;
+  const rows = scannedBill && [
+    ["Account Number", scannedBill.accountNumber],
+    ["Meter Number", scannedBill.meterNumber],
+    ["Customer Name", scannedBill.customerName],
+    ["Bill Period", scannedBill.billPeriod],
+    ["Package", scannedBill.package],
+    ["Due Date", scannedBill.dueDate && formatBillDate(scannedBill.dueDate) + (scannedBill.overdue ? " ⚠️" : "")],
+  ].filter(([, value]) => value);
+
   return (
     <div style={styles.esusuContainer}>
       <h3 style={styles.esusuTitle}>📄 Scan Your Bill</h3>
@@ -605,9 +656,16 @@ function BillScannerView({ onImageUpload, scannedBill, isScanning, onPayBill, fi
         ref={fileInputRef}
         type="file"
         accept="image/*"
+        capture="environment"
         onChange={onImageUpload}
         style={{ display: 'none' }}
       />
+
+      {notice && !isScanning && (
+        <div style={{ ...styles.infoBox, marginBottom: 16, borderColor: "rgba(124,58,237,0.4)" }}>
+          <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5 }}>{notice}</p>
+        </div>
+      )}
 
       {!scannedBill && !isScanning && (
         <>
@@ -615,7 +673,7 @@ function BillScannerView({ onImageUpload, scannedBill, isScanning, onPayBill, fi
             <div style={styles.uploadIcon}>📸</div>
             <h4 style={{ margin: "16px 0 8px 0", fontSize: 18 }}>Upload Bill Image</h4>
             <p style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>
-              Click here to select an image from your device
+              Tap to take a photo or choose one from your device
             </p>
             <p style={{ margin: "8px 0 0 0", fontSize: 12, color: "#64748b" }}>
               Supports: Electricity, Water, Internet, Cable TV bills
@@ -623,31 +681,21 @@ function BillScannerView({ onImageUpload, scannedBill, isScanning, onPayBill, fi
           </div>
 
           <div style={styles.billTypeGrid}>
-            <div style={styles.billTypeCard}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>⚡</div>
-              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Electricity</p>
-            </div>
-            <div style={styles.billTypeCard}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>💧</div>
-              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Water</p>
-            </div>
-            <div style={styles.billTypeCard}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>📡</div>
-              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Internet</p>
-            </div>
-            <div style={styles.billTypeCard}>
-              <div style={{ fontSize: 32, marginBottom: 8 }}>📺</div>
-              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Cable TV</p>
-            </div>
+            {[["⚡", "Electricity"], ["💧", "Water"], ["📡", "Internet"], ["📺", "Cable TV"]].map(([icon, label]) => (
+              <div key={label} style={styles.billTypeCard}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>{icon}</div>
+                <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{label}</p>
+              </div>
+            ))}
           </div>
 
           <div style={styles.infoBox}>
             <h4 style={{ margin: "0 0 8px 0", fontSize: 14 }}>How It Works 💡</h4>
             <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "#94a3b8" }}>
-              1. Take a clear photo of your bill or upload from gallery<br/>
-              2. SARA will automatically extract the payment details<br/>
-              3. Review the details and confirm payment<br/>
-              4. Done! Your bill is paid instantly 🎉
+              1. Take a clear photo of the whole bill, in good light<br/>
+              2. SARA reads the provider, account number and amount<br/>
+              3. Check the details and change the amount if you need to<br/>
+              4. Tap Pay 🎉
             </p>
           </div>
         </>
@@ -667,60 +715,46 @@ function BillScannerView({ onImageUpload, scannedBill, isScanning, onPayBill, fi
 
       {scannedBill && !isScanning && (
         <div style={styles.billDetailsContainer}>
-          <div style={styles.successBadge}>✓ Bill Scanned Successfully</div>
-          
           <div style={styles.billCard}>
             <div style={styles.billHeader}>
-              <h4 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>{scannedBill.provider}</h4>
-              <div style={styles.billAmount}>₦{scannedBill.amount.toLocaleString()}</div>
+              <h4 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>
+                {BILL_ICONS[scannedBill.billType] || "🧾"} {scannedBill.provider}
+              </h4>
+              {scannedBill.amount && <div style={styles.billAmount}>₦{scannedBill.amount.toLocaleString()}</div>}
             </div>
 
             <div style={styles.billDetails}>
-              <div style={styles.billDetailRow}>
-                <span style={styles.billLabel}>Account Number:</span>
-                <span style={styles.billValue}>{scannedBill.accountNumber}</span>
-              </div>
-              <div style={styles.billDetailRow}>
-                <span style={styles.billLabel}>Customer Name:</span>
-                <span style={styles.billValue}>{scannedBill.customerName}</span>
-              </div>
-              {scannedBill.billPeriod && (
-                <div style={styles.billDetailRow}>
-                  <span style={styles.billLabel}>Bill Period:</span>
-                  <span style={styles.billValue}>{scannedBill.billPeriod}</span>
+              {rows.map(([label, value]) => (
+                <div key={label} style={styles.billDetailRow}>
+                  <span style={styles.billLabel}>{label}:</span>
+                  <span style={styles.billValue}>{value}</span>
                 </div>
-              )}
-              {scannedBill.package && (
-                <div style={styles.billDetailRow}>
-                  <span style={styles.billLabel}>Package:</span>
-                  <span style={styles.billValue}>{scannedBill.package}</span>
-                </div>
-              )}
-              {scannedBill.meterNumber && (
-                <div style={styles.billDetailRow}>
-                  <span style={styles.billLabel}>Meter Number:</span>
-                  <span style={styles.billValue}>{scannedBill.meterNumber}</span>
-                </div>
-              )}
-              <div style={styles.billDetailRow}>
-                <span style={styles.billLabel}>Due Date:</span>
-                <span style={styles.billValue}>
-                  {new Date(scannedBill.dueDate).toLocaleDateString('en-NG', {
-                    year: 'numeric',
-                    month: 'long',
-                    day: 'numeric'
-                  })}
-                </span>
-              </div>
+              ))}
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
-            <button onClick={onPayBill} style={styles.payButton}>
-              Pay ₦{scannedBill.amount.toLocaleString()} Now
+          <label style={{ display: "block", margin: "20px 0 6px", fontSize: 14, color: "#94a3b8" }}>
+            Amount to pay (₦)
+          </label>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={amount}
+            onChange={(e) => onAmountChange(e.target.value)}
+            placeholder="e.g. 5000"
+            style={styles.input}
+          />
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              onClick={onPayBill}
+              disabled={!canPay}
+              style={{ ...styles.payButton, opacity: canPay ? 1 : 0.5, cursor: canPay ? "pointer" : "not-allowed" }}
+            >
+              {isPaying ? "Paying..." : canPay ? `Pay ₦${amountValue.toLocaleString()} Now` : "Enter an amount"}
             </button>
-            <button 
-              onClick={() => fileInputRef.current?.click()} 
+            <button
+              onClick={() => fileInputRef.current?.click()}
               style={styles.buttonSecondary}
             >
               Scan Another
@@ -729,7 +763,7 @@ function BillScannerView({ onImageUpload, scannedBill, isScanning, onPayBill, fi
 
           <div style={styles.securityNote}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>
-              🔒 Your payment is secured and will be processed instantly
+              🔒 Check the account number before you pay. SARA pays the provider shown above.
             </p>
           </div>
         </div>

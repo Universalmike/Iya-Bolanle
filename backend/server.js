@@ -3,7 +3,8 @@ import cors from "cors";
 import bcrypt from "bcryptjs";
 import pkg from 'pg';
 import { parseIntent, parseConfirmation, parseLanguageCommand, removeAccents, normalize, LANGUAGES } from "./nlu.js";
-import { createEsusuRouter, migrateEsusu, contribute, contributionMessage, statusMessage, listGroups, pickGroup } from "./esusu.js";
+import { createBillsRouter, createBillTables } from "./bills.js";
+import { createEsusuRouter, migrateEsusu, formatDate, contribute, contributionMessage, statusMessage, listGroups, pickGroup } from "./esusu.js";
 import { t, naira, billTypeName, LANGUAGE_NAMES } from "./messages.js";
 import { signToken, requireAuth, requireSameUser, validateSignup, createRateLimiter } from "./auth.js";
 const { Pool } = pkg;
@@ -12,7 +13,7 @@ const app = express();
 // Render (and most hosts) sit behind a proxy; needed so req.ip is the real client IP.
 app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json({ limit: "5mb" })); // bill photos are sent as base64
+app.use(express.json({ limit: "6mb" })); // bill photos are sent as base64
 
 // PostgreSQL connection
 const pool = new Pool({
@@ -127,6 +128,7 @@ const createTables = async () => {
 
 // The Esusu migration runs after the base tables exist (it adds columns and refunds old groups once).
 createTables()
+  .then(() => createBillTables(pool))
   .then(() => migrateEsusu(pool, withTransaction))
   .catch((err) => console.error("Esusu migration failed:", err));
 
@@ -691,96 +693,8 @@ app.get(["/history", "/history/:username"], requireAuth, requireSameUser, loadLa
 });
 
 // --------- Bill Scanner ----------
-app.post("/scan-bill", requireAuth, loadLanguage, (req, res) => {
-  const username = req.username;
-  const { imageData, billType } = req.body;
-
-  if (!imageData) return fail(res, 400, req.lang, "billImageMissing");
-
-  const mockBills = {
-    electricity: {
-      provider: "EKEDC",
-      accountNumber: "1234567890",
-      customerName: username,
-      amount: Math.floor(Math.random() * 5000) + 2000,
-      dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-      billPeriod: "December 2024",
-      meterNumber: "45678901234"
-    },
-    water: {
-      provider: "Lagos Water Corp",
-      accountNumber: "WTR" + Math.floor(Math.random() * 1000000),
-      customerName: username,
-      amount: Math.floor(Math.random() * 3000) + 1000,
-      dueDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
-      billPeriod: "December 2024"
-    }
-  };
-
-  const type = mockBills[billType] ? billType : "electricity";
-  const billData = mockBills[type];
-  const message = t("billScanned", req.lang, billTypeName(type, req.lang), billData.amount);
-
-  res.json({ success: true, billData, message, speak: toSpeech(message), language: req.lang });
-});
-
-// A positive whole-naira amount within limits, or null.
-const validAmount = (value, max) =>
-  Number.isInteger(value) && value > 0 && value <= max ? value : null;
-
-// Deducts amount only if the balance covers it (atomic, safe under concurrency).
-// Returns the new balance, or null if funds are insufficient.
-const debit = async (db, username, amount) => {
-  const { rows } = await db.query(
-    "UPDATE users SET balance = balance - $1 WHERE username=$2 AND balance >= $1 RETURNING balance",
-    [amount, username]
-  );
-  return rows.length ? rows[0].balance : null;
-};
-
-const currentBalance = async (username) =>
-  (await pool.query("SELECT balance FROM users WHERE username=$1", [username])).rows[0]?.balance ?? 0;
-
-const MAX_PAYMENT = 1_000_000;
-
-// NOTE: billData still comes from the client (the scanner is a mock). The amount is
-// validated here, but the proper fix is for the server to store scanned bills.
-app.post("/pay-bill", requireAuth, loadLanguage, async (req, res) => {
-  const username = req.username;
-  const lang = req.lang;
-  const { billData } = req.body;
-
-  const amount = validAmount(billData?.amount, MAX_PAYMENT);
-  if (!billData || !amount) return fail(res, 400, lang, "billInvalid");
-
-  try {
-    const result = await withTransaction(async (db) => {
-      const balance = await debit(db, username, amount);
-      if (balance === null) return { ok: false };
-      await db.query(
-        "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
-        [username, "Bill Payment", amount, `${billData.provider} - ${billData.accountNumber}`]
-      );
-      return { ok: true, balance };
-    });
-
-    if (!result.ok) {
-      return fail(res, 400, lang, "insufficientFunds", await currentBalance(username), amount);
-    }
-
-    const message = t("billPaid", lang, billData.provider, amount, result.balance);
-    res.json({
-      message,
-      speak: toSpeech(message),
-      language: lang,
-      balance: result.balance,
-      receiptNumber: "RCP" + Date.now()
-    });
-  } catch (err) {
-    console.error("Pay bill error:", err);
-    fail(res, 500, lang, "paymentFailed");
-  }
-});
+// Gemini reads the photo; scanned bills are stored server-side and paid by id (see bills.js).
+app.use(createBillsRouter({ pool, withTransaction, requireAuth, loadLanguage, fail, t, toSpeech, billTypeName, formatDate, gemini: geminiOpts }));
 
 // --------- Esusu (savings groups) ----------
 // Routes and round/payout logic live in esusu.js.
