@@ -2,7 +2,8 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import pkg from 'pg';
-import { parseIntent, parseConfirmation, parseLanguageCommand, removeAccents, LANGUAGES } from "./nlu.js";
+import { parseIntent, parseConfirmation, parseLanguageCommand, removeAccents, normalize, LANGUAGES } from "./nlu.js";
+import { createEsusuRouter, migrateEsusu, contribute, contributionMessage, statusMessage, listGroups, pickGroup } from "./esusu.js";
 import { t, naira, billTypeName, LANGUAGE_NAMES } from "./messages.js";
 import { signToken, requireAuth, requireSameUser, validateSignup, createRateLimiter } from "./auth.js";
 const { Pool } = pkg;
@@ -124,7 +125,10 @@ const createTables = async () => {
   }
 };
 
-createTables();
+// The Esusu migration runs after the base tables exist (it adds columns and refunds old groups once).
+createTables()
+  .then(() => migrateEsusu(pool, withTransaction))
+  .catch((err) => console.error("Esusu migration failed:", err));
 
 // --------- Language ----------
 const isLanguage = (value) => LANGUAGES.includes(value);
@@ -263,9 +267,20 @@ const executeAirtime = (username, { amount, phone }, lang) =>
     return { ok: true, balance, message: t("airtimeSuccess", lang, amount, balance) };
   });
 
-const executors = { transfer: executeTransfer, airtime: executeAirtime };
+// Esusu contribution confirmed in chat. contribute() re-checks everything
+// (still a member, not already paid this round, enough balance) at execution time.
+const executeEsusu = async (username, { groupId }, lang) => {
+  const result = await withTransaction((db) => contribute(db, { username, groupId }));
+  if (!result.ok) return { ok: false, message: t(result.key, lang, ...(result.args || [])) };
+  return { ok: true, balance: result.balance, message: contributionMessage(t, lang, result) };
+};
 
-const HISTORY_ICONS = { Airtime: "📱", Transfer: "💸", Received: "💰", "Bill Payment": "🧾", "Esusu Contribution": "🤝" };
+const executors = { transfer: executeTransfer, airtime: executeAirtime, esusu: executeEsusu };
+
+const HISTORY_ICONS = {
+  Airtime: "📱", Transfer: "💸", Received: "💰", "Bill Payment": "🧾",
+  "Esusu Contribution": "🤝", "Esusu Payout": "🎉", "Esusu Refund": "↩️",
+};
 
 const formatHistory = (rows, lang) => {
   if (!rows.length) return t("historyEmpty", lang);
@@ -585,6 +600,32 @@ app.post("/action", requireAuth, async (req, res) => {
         return reply(lang, t("confirmAirtime", lang, amount, phone), { awaitingConfirmation: true, pendingAction: action });
       }
 
+      case "esusu_pay": {
+        const groups = await listGroups(pool, username);
+        if (!groups.length) return reply(lang, t("esusuNoGroups", lang));
+        const { group, active } = pickGroup(groups, normalize(text), normalize);
+        if (!group) {
+          if (!active.length) return reply(lang, t("esusuNoActive", lang));
+          return reply(lang, t("esusuPickGroup", lang, active.map((g) => g.group_name)));
+        }
+        if (group.paid_this_round) return reply(lang, t("alreadyPaidRound", lang, group.current_cycle));
+        if (user.balance < group.amount_per_person) {
+          return reply(lang, t("insufficientFunds", lang, user.balance, group.amount_per_person));
+        }
+
+        const action = { type: "esusu", groupId: group.id, amount: group.amount_per_person };
+        await savePendingAction(username, action, lang);
+        return reply(lang, t("confirmEsusu", lang, group.amount_per_person, group.group_name, group.current_cycle), {
+          awaitingConfirmation: true,
+          pendingAction: action,
+        });
+      }
+
+      case "esusu_status": {
+        const groups = await listGroups(pool, username);
+        return reply(lang, statusMessage(t, lang, groups));
+      }
+
       case "history": {
         const { rows } = await pool.query(
           "SELECT * FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 10",
@@ -741,148 +782,9 @@ app.post("/pay-bill", requireAuth, loadLanguage, async (req, res) => {
   }
 });
 
-// --------- Esusu Endpoints ----------
-const ESUSU_FREQUENCIES = ["daily", "weekly", "monthly"];
-const ESUSU_MEMBERS = { min: 2, max: 50 };
-
-app.post("/esusu/create", requireAuth, loadLanguage, async (req, res) => {
-  const username = req.username;
-  const lang = req.lang;
-  const { frequency } = req.body;
-  const groupName = typeof req.body.groupName === "string" ? req.body.groupName.trim() : "";
-  const amountPerPerson = validAmount(req.body.amountPerPerson, MAX_PAYMENT);
-  const totalMembers = Number.isInteger(req.body.totalMembers) ? req.body.totalMembers : null;
-
-  if (!groupName || groupName.length > 50) return fail(res, 400, lang, "groupNameInvalid");
-  if (!amountPerPerson) return fail(res, 400, lang, "esusuAmountInvalid", MAX_PAYMENT);
-  if (!ESUSU_FREQUENCIES.includes(frequency)) return fail(res, 400, lang, "esusuFrequencyInvalid");
-  if (!totalMembers || totalMembers < ESUSU_MEMBERS.min || totalMembers > ESUSU_MEMBERS.max) {
-    return fail(res, 400, lang, "esusuMembersInvalid", ESUSU_MEMBERS.min, ESUSU_MEMBERS.max);
-  }
-
-  try {
-    const result = await pool.query(
-      "INSERT INTO esusu_groups (group_name, amount_per_person, frequency, total_members, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-      [groupName, amountPerPerson, frequency, totalMembers, username]
-    );
-
-    const groupId = result.rows[0].id;
-
-    await pool.query(
-      "INSERT INTO esusu_members (group_id, username, position) VALUES ($1, $2, $3)",
-      [groupId, username, 1]
-    );
-
-    const message = t("groupCreated", lang, groupName);
-    res.json({ message, speak: toSpeech(message), language: lang, groupId });
-  } catch (err) {
-    if (err.code === "23505") return fail(res, 400, lang, "groupNameTaken");
-    console.error("Esusu create error:", err);
-    fail(res, 500, lang, "groupCreateFailed");
-  }
-});
-
-app.post("/esusu/join", requireAuth, loadLanguage, async (req, res) => {
-  const username = req.username;
-  const lang = req.lang;
-  const { groupName } = req.body;
-
-  try {
-    const groupResult = await pool.query("SELECT * FROM esusu_groups WHERE group_name=$1", [groupName]);
-    if (groupResult.rows.length === 0) return fail(res, 400, lang, "groupNotFound", groupName);
-
-    const group = groupResult.rows[0];
-
-    const existingResult = await pool.query(
-      "SELECT * FROM esusu_members WHERE group_id=$1 AND username=$2",
-      [group.id, username]
-    );
-    if (existingResult.rows.length > 0) return fail(res, 400, lang, "alreadyMember");
-
-    const membersResult = await pool.query("SELECT * FROM esusu_members WHERE group_id=$1", [group.id]);
-    if (membersResult.rows.length >= group.total_members) return fail(res, 400, lang, "groupFull");
-
-    const position = membersResult.rows.length + 1;
-
-    await pool.query(
-      "INSERT INTO esusu_members (group_id, username, position) VALUES ($1, $2, $3)",
-      [group.id, username, position]
-    );
-
-    const message = t("joinedGroup", lang, groupName, position);
-    res.json({ message, speak: toSpeech(message), language: lang });
-  } catch (err) {
-    console.error("Esusu join error:", err);
-    fail(res, 500, lang, "joinFailed");
-  }
-});
-
-app.post("/esusu/contribute", requireAuth, loadLanguage, async (req, res) => {
-  const username = req.username;
-  const lang = req.lang;
-  const { groupName } = req.body;
-
-  try {
-    const groupResult = await pool.query("SELECT * FROM esusu_groups WHERE group_name=$1", [groupName]);
-    if (groupResult.rows.length === 0) return fail(res, 400, lang, "groupNotFound", groupName);
-
-    const group = groupResult.rows[0];
-    const amount = group.amount_per_person;
-
-    const memberResult = await pool.query(
-      "SELECT * FROM esusu_members WHERE group_id=$1 AND username=$2",
-      [group.id, username]
-    );
-    if (memberResult.rows.length === 0) return fail(res, 400, lang, "notMember");
-
-    // Groups created before amount validation existed could hold a bad amount.
-    if (!validAmount(amount, MAX_PAYMENT)) return fail(res, 400, lang, "groupBadAmount");
-
-    const result = await withTransaction(async (db) => {
-      const balance = await debit(db, username, amount);
-      if (balance === null) return { ok: false };
-
-      // Cycle tracking is still a placeholder (always 1) until the Esusu cycle logic is built.
-      await db.query(
-        "INSERT INTO esusu_contributions (group_id, username, amount, cycle_number) VALUES ($1, $2, $3, $4)",
-        [group.id, username, amount, 1]
-      );
-      await db.query(
-        "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
-        [username, "Esusu Contribution", amount, groupName]
-      );
-      return { ok: true, balance };
-    });
-
-    if (!result.ok) {
-      return fail(res, 400, lang, "insufficientFunds", await currentBalance(username), amount);
-    }
-
-    const message = t("contributed", lang, amount, groupName, result.balance);
-    res.json({ message, speak: toSpeech(message), language: lang, balance: result.balance });
-  } catch (err) {
-    console.error("Esusu contribute error:", err);
-    fail(res, 500, lang, "contributeFailed");
-  }
-});
-
-app.get(["/esusu/my-groups", "/esusu/my-groups/:username"], requireAuth, requireSameUser, loadLanguage, async (req, res) => {
-  const username = req.username;
-
-  try {
-    const result = await pool.query(
-      `SELECT g.*, m.position, m.has_collected
-       FROM esusu_groups g
-       JOIN esusu_members m ON g.id = m.group_id
-       WHERE m.username=$1`,
-      [username]
-    );
-    res.json({ groups: result.rows });
-  } catch (err) {
-    console.error("Esusu groups error:", err);
-    fail(res, 500, req.lang, "groupsFetchFailed");
-  }
-});
+// --------- Esusu (savings groups) ----------
+// Routes and round/payout logic live in esusu.js.
+app.use("/esusu", createEsusuRouter({ pool, withTransaction, requireAuth, loadLanguage, fail, t, toSpeech }));
 
 // --------- Start Server ----------
 const PORT = process.env.PORT || 3001;

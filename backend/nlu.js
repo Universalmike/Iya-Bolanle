@@ -3,7 +3,9 @@
 // No external dependencies so it can be unit-tested with `node --test`.
 
 export const LANGUAGES = ["english", "pidgin", "yoruba", "igbo", "hausa"];
-export const INTENTS = ["balance", "airtime", "transfer", "history", "advice", "greeting", "help", "other"];
+export const INTENTS = [
+  "balance", "airtime", "transfer", "history", "esusu_pay", "esusu_status", "advice", "greeting", "help", "other",
+];
 
 // --------- Text normalisation ----------
 const HOOKED_LETTERS = { "ɓ": "b", "Ɓ": "B", "ɗ": "d", "Ɗ": "D", "ƙ": "k", "Ƙ": "K", "ƴ": "y", "Ƴ": "Y" };
@@ -105,7 +107,14 @@ export const extractRecipient = (text) => {
 // --------- Intent (regex fallback) ----------
 // Order matters: money-moving intents are checked before balance so that
 // e.g. Hausa "tura kudin 500 ga musa" (send money) is not read as a balance check.
+// Savings-group words: esusu/ajo (Yoruba), isusu (Igbo), adashe (Hausa).
+const ESUSU = String.raw`(?:esusu|ajo|isusu|adashe|contribution)`;
+const PAY = String.raw`(?:pay|contribute|send|put|remit|san|biya|tura|kwuo|tinye)`;
+
 const INTENT_RULES = [
+  // Before "transfer", so "pay my ajo" isn't read as paying a person called "ajo".
+  ["esusu_pay", new RegExp(String.raw`\b${PAY}\b.*\b${ESUSU}\b|\b${ESUSU}\b.*\b${PAY}\b|^contribute\b`)],
+  ["esusu_status", new RegExp(String.raw`\b${ESUSU}\b|\bmy turn\b|\bwhen (do|will|can) i collect\b|\bwho (has|hasn'?t|never) pa(id|y)\b`)],
   ["airtime", /\b(airtime|recharge|top ?up|kaadi|kati)\b/],
   ["transfer", /\b(send|transfer|pay|give|fi .*ranse|ranse|ziga|zigara|tura|aika)\b/],
   ["history", /\b(history|transactions?|statement|wetin i don spend|spent)\b/],
@@ -185,6 +194,8 @@ Return JSON with:
   airtime  – wants to buy/recharge phone airtime
   transfer – wants to send/pay money to another SARA user
   history  – wants past transactions / spending
+  esusu_pay    – wants to pay their contribution to a savings group (esusu, ajo, isusu, adashe)
+  esusu_status – asks about their savings group: whose turn, when they collect, who has paid, when payment is due
   advice   – asks for financial advice, savings, investment, budgeting tips, or a question about their money
   greeting – just says hello
   help     – asks what SARA can do

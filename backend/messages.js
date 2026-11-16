@@ -381,11 +381,11 @@ const messages = {
     hausa: (min, max) => `Kungiya tana bukatar mambobi tsakanin ${min} da ${max}.`,
   },
   groupCreated: {
-    english: (name) => `Great! Your esusu group "${name}" has been created!`,
-    pidgin: (name) => `Correct! Your esusu group "${name}" don ready!`,
-    yoruba: (name) => `O dara! A ti da egbe esusu re "${name}" sile!`,
-    igbo: (name) => `O di mma! Emepela otu esusu gi "${name}"!`,
-    hausa: (name) => `Madalla! An kirkiri kungiyar adashe "${name}"!`,
+    english: (name, code) => `Great! Your esusu group "${name}" has been created. Share the invite code ${code} so others can join.`,
+    pidgin: (name, code) => `Correct! Your esusu group "${name}" don ready. Share the invite code ${code} make others join.`,
+    yoruba: (name, code) => `O dara! A ti da egbe esusu re "${name}" sile. Pin koodu ifiwepe ${code} ki awon miiran le darapo.`,
+    igbo: (name, code) => `O di mma! Emepela otu esusu gi "${name}". Kesaa koodu oku ${code} ka ndi ozo sonye.`,
+    hausa: (name, code) => `Madalla! An kirkiri kungiyar adashe "${name}". Raba lambar gayyata ${code} don wasu su shiga.`,
   },
   groupNameTaken: {
     english: () => `A group with that name already exists.`,
@@ -470,6 +470,196 @@ const messages = {
     yoruba: () => `Mi o le gbe awon egbe re wa.`,
     igbo: () => `Enweghi m ike iweta otu gi.`,
     hausa: () => `Ban iya kawo kungiyoyin ka ba.`,
+  },
+
+  // ----- Esusu rounds -----
+  inviteCodeInvalid: {
+    english: () => `No group found with that invite code. Please check it and try again.`,
+    pidgin: () => `I no see any group with that invite code. Abeg check am again.`,
+    yoruba: () => `A ko ri egbe kankan pelu koodu ifiwepe yen. Jowo sayewo re.`,
+    igbo: () => `Enweghi otu nwere koodu oku ahu. Biko lelee ya ozo.`,
+    hausa: () => `Ba a sami kungiya mai wannan lambar gayyata ba. Don Allah ka duba ta.`,
+  },
+  groupAlreadyStarted: {
+    english: () => `This group has already started, so that's no longer possible.`,
+    pidgin: () => `This group don already start, so e no fit happen again.`,
+    yoruba: () => `Egbe yii ti bere tele, nitorina eyi ko see se mo.`,
+    igbo: () => `Otu a ebidola, ya mere nke a agaghi ekwe omume ozo.`,
+    hausa: () => `Wannan kungiya ta riga ta fara, don haka hakan ba zai yiwu ba.`,
+  },
+  groupStarted: {
+    english: (name, first, due) => `"${name}" has started! ${first} collects first. Round 1 contributions are due by ${due}.`,
+    pidgin: (name, first, due) => `"${name}" don start! ${first} go collect first. Round 1 money suppose enter before ${due}.`,
+    yoruba: (name, first, due) => `"${name}" ti bere! ${first} ni yoo koko gba. Owo iyipo kinni gbodo wole ki ${due} to de.`,
+    igbo: (name, first, due) => `"${name}" ebidola! ${first} ga-ebu ugo nara. A ga-atinye ego agba nke mbu tupu ${due}.`,
+    hausa: (name, first, due) => `"${name}" ta fara! ${first} ne zai fara karba. Ana bukatar kudin zagaye na farko kafin ${due}.`,
+  },
+  notCreator: {
+    english: () => `Only the person who created the group can do that.`,
+    pidgin: () => `Na only the person wey create the group fit do am.`,
+    yoruba: () => `Eni to da egbe sile nikan lo le se eyi.`,
+    igbo: () => `Naani onye mepere otu a nwere ike ime nke a.`,
+    hausa: () => `Wanda ya kirkiri kungiyar ne kadai zai iya yin haka.`,
+  },
+  needTwoMembers: {
+    english: () => `A group needs at least 2 members before it can start.`,
+    pidgin: () => `Group need at least 2 members before e fit start.`,
+    yoruba: () => `Egbe nilo o kere ju omo egbe meji ki o to bere.`,
+    igbo: () => `Otu choro opekata mpe mmadu abuo tupu o bido.`,
+    hausa: () => `Kungiya tana bukatar akalla mambobi 2 kafin ta fara.`,
+  },
+  groupNotStarted: {
+    english: () => `This group hasn't started yet. Contributions open once it starts.`,
+    pidgin: () => `This group never start. You go fit pay once e start.`,
+    yoruba: () => `Egbe yii ko tii bere. A o le san owo titi yoo fi bere.`,
+    igbo: () => `Otu a ebidobeghi. I nwere ike itinye ego ozigbo o bidoro.`,
+    hausa: () => `Wannan kungiya ba ta fara ba tukuna. Za a iya biya da zarar ta fara.`,
+  },
+  groupIsCompleted: {
+    english: () => `This group has finished all its rounds.`,
+    pidgin: () => `This group don finish all im rounds.`,
+    yoruba: () => `Egbe yii ti pari gbogbo iyipo re.`,
+    igbo: () => `Otu a emechaala agba ya nile.`,
+    hausa: () => `Wannan kungiya ta kammala dukkan zagayen ta.`,
+  },
+  alreadyPaidRound: {
+    english: (round) => `You've already paid for round ${round}. Wait for the next round.`,
+    pidgin: (round) => `You don already pay for round ${round}. Wait for the next round.`,
+    yoruba: (round) => `O ti san owo iyipo ${round} tele. Duro de iyipo to kan.`,
+    igbo: (round) => `I kwuola ugwo agba ${round}. Chere agba na-abia.`,
+    hausa: (round) => `Ka riga ka biya na zagaye na ${round}. Jira zagaye na gaba.`,
+  },
+  roundProgress: {
+    english: (paid, total) => `${paid} of ${total} members have paid this round.`,
+    pidgin: (paid, total) => `${paid} out of ${total} members don pay for this round.`,
+    yoruba: (paid, total) => `Omo egbe ${paid} ninu ${total} ti san owo iyipo yii.`,
+    igbo: (paid, total) => `Mmadu ${paid} n'ime ${total} akwuola ugwo agba a.`,
+    hausa: (paid, total) => `Mambobi ${paid} cikin ${total} sun biya a wannan zagaye.`,
+  },
+  payoutMade: {
+    english: (who, amt, round) => `Everyone has paid round ${round}, so ${who} has received ${naira(amt)}! 🎉`,
+    pidgin: (who, amt, round) => `Everybody don pay round ${round}, so ${who} don collect ${naira(amt)}! 🎉`,
+    yoruba: (who, amt, round) => `Gbogbo eniyan ti san owo iyipo ${round}, nitorina ${who} ti gba ${naira(amt)}! 🎉`,
+    igbo: (who, amt, round) => `Onye obula akwuola ugwo agba ${round}, ya mere ${who} anatala ${naira(amt)}! 🎉`,
+    hausa: (who, amt, round) => `Kowa ya biya zagaye na ${round}, don haka ${who} ya karbi ${naira(amt)}! 🎉`,
+  },
+  groupFinished: {
+    english: (name) => `That was the last round, so "${name}" is complete. Well done, everyone!`,
+    pidgin: (name) => `Na the last round be that, so "${name}" don finish. Well done una!`,
+    yoruba: (name) => `Iyipo to gbeyin niyen, nitorina "${name}" ti pari. E ku ise o!`,
+    igbo: (name) => `Nke ahu bu agba ikpeazu, ya mere "${name}" agwula. Unu emeela!`,
+    hausa: (name) => `Wannan shine zagaye na karshe, don haka "${name}" ta kammala. Madalla da ku duka!`,
+  },
+  leftGroup: {
+    english: (name) => `You've left "${name}".`,
+    pidgin: (name) => `You don comot from "${name}".`,
+    yoruba: (name) => `O ti kuro ninu "${name}".`,
+    igbo: (name) => `I hapula "${name}".`,
+    hausa: (name) => `Ka bar "${name}".`,
+  },
+  groupCancelled: {
+    english: (name) => `"${name}" has been cancelled.`,
+    pidgin: (name) => `"${name}" don cancel.`,
+    yoruba: (name) => `A ti fagile "${name}".`,
+    igbo: (name) => `Akagbuola "${name}".`,
+    hausa: (name) => `An soke "${name}".`,
+  },
+  cannotLeaveStarted: {
+    english: () => `Members can't leave or be removed once the group has started.`,
+    pidgin: () => `Once group don start, nobody fit comot or be removed.`,
+    yoruba: () => `Ni kete ti egbe ba ti bere, eniyan ko le kuro tabi ki a yo o.`,
+    igbo: () => `Ozigbo otu bidoro, onweghi onye nwere ike ihapu ma o bu a wepu ya.`,
+    hausa: () => `Da zarar kungiya ta fara, ba wanda zai iya fita ko a cire shi.`,
+  },
+  cannotRemoveSelf: {
+    english: () => `You can't remove yourself. Use Leave instead, which cancels the group.`,
+    pidgin: () => `You no fit remove yourself. Use Leave, e go cancel the group.`,
+    yoruba: () => `O ko le yo ara re. Lo Leave dipo, eyi to fagile egbe naa.`,
+    igbo: () => `I nweghi ike iwepu onwe gi. Jiri Leave, nke ga-akagbu otu ahu.`,
+    hausa: () => `Ba za ka iya cire kanka ba. Yi amfani da Leave, wanda zai soke kungiyar.`,
+  },
+  memberRemoved: {
+    english: (who) => `${who} has been removed from the group.`,
+    pidgin: (who) => `${who} don comot from the group.`,
+    yoruba: (who) => `A ti yo ${who} kuro ninu egbe.`,
+    igbo: (who) => `Ewepula ${who} n'otu ahu.`,
+    hausa: (who) => `An cire ${who} daga kungiyar.`,
+  },
+  memberNotFound: {
+    english: (who) => `${who} isn't a member of this group.`,
+    pidgin: (who) => `${who} no be member of this group.`,
+    yoruba: (who) => `${who} ki i se omo egbe yii.`,
+    igbo: (who) => `${who} anoghi n'otu a.`,
+    hausa: (who) => `${who} ba mamba na wannan kungiya ba ne.`,
+  },
+  positionsShuffled: {
+    english: (name) => `The collection order for "${name}" has been shuffled.`,
+    pidgin: (name) => `I don shuffle the collection order for "${name}".`,
+    yoruba: (name) => `A ti da ilana gbigba owo "${name}" po.`,
+    igbo: (name) => `Agbanweela usoro nnata ego nke "${name}".`,
+    hausa: (name) => `An jujjuya tsarin karbar kudi na "${name}".`,
+  },
+
+  // ----- Esusu in chat -----
+  esusuNoGroups: {
+    english: () => `You're not in any esusu group yet. Open the Esusu tab to create or join one.`,
+    pidgin: () => `You never join any esusu group. Open the Esusu tab make you create or join one.`,
+    yoruba: () => `O ko tii wa ninu egbe esusu kankan. Si Esusu lati da tabi darapo mo okan.`,
+    igbo: () => `I sonyebeghi n'otu isusu obula. Mepee Esusu ka i mepee ma o bu sonye n'otu.`,
+    hausa: () => `Ba ka cikin wata kungiyar adashe tukuna. Bude Esusu don kirkira ko shiga daya.`,
+  },
+  esusuNoActive: {
+    english: () => `None of your esusu groups is collecting contributions right now.`,
+    pidgin: () => `None of your esusu group dey collect money now.`,
+    yoruba: () => `Ko si egbe esusu re kankan to n gba owo lowolowo.`,
+    igbo: () => `O nweghi otu isusu gi na-anara ego ugbu a.`,
+    hausa: () => `Babu kungiyar adashe ta ka da ke karbar kudi yanzu.`,
+  },
+  esusuPickGroup: {
+    english: (names) => `Which group? You're in: ${names.join(", ")}. Say e.g. "pay my ajo ${names[0]}".`,
+    pidgin: (names) => `Which group? You dey: ${names.join(", ")}. Talk like "pay my ajo ${names[0]}".`,
+    yoruba: (names) => `Egbe wo? O wa ninu: ${names.join(", ")}. So bi "pay my ajo ${names[0]}".`,
+    igbo: (names) => `Otu kedu? I no na: ${names.join(", ")}. Kwuo dika "pay my ajo ${names[0]}".`,
+    hausa: (names) => `Wace kungiya? Kana cikin: ${names.join(", ")}. Ka ce misali "pay my ajo ${names[0]}".`,
+  },
+  confirmEsusu: {
+    english: (amt, name, round) => `Pay ${naira(amt)} to "${name}" for round ${round}? Reply YES to confirm or NO to cancel.`,
+    pidgin: (amt, name, round) => `You wan pay ${naira(amt)} for "${name}" round ${round}? Talk YES or NO.`,
+    yoruba: (amt, name, round) => `Se ki n san ${naira(amt)} si "${name}" fun iyipo ${round}? So BEENI tabi RARA.`,
+    igbo: (amt, name, round) => `Ka m kwuo ${naira(amt)} na "${name}" maka agba ${round}? Zaa EE ma o bu MBA.`,
+    hausa: (amt, name, round) => `In biya ${naira(amt)} zuwa "${name}" don zagaye na ${round}? Ka ce EH ko A'A.`,
+  },
+  esusuStatusForming: {
+    english: (name, count, total, code) => `"${name}": waiting for members (${count} of ${total}). Invite code: ${code}.`,
+    pidgin: (name, count, total, code) => `"${name}": still dey wait for members (${count} of ${total}). Invite code: ${code}.`,
+    yoruba: (name, count, total, code) => `"${name}": n duro de omo egbe (${count} ninu ${total}). Koodu ifiwepe: ${code}.`,
+    igbo: (name, count, total, code) => `"${name}": na-echere ndi otu (${count} n'ime ${total}). Koodu oku: ${code}.`,
+    hausa: (name, count, total, code) => `"${name}": ana jiran mambobi (${count} cikin ${total}). Lambar gayyata: ${code}.`,
+  },
+  esusuStatusCompleted: {
+    english: (name) => `"${name}": completed. Everyone has collected.`,
+    pidgin: (name) => `"${name}": e don finish. Everybody don collect.`,
+    yoruba: (name) => `"${name}": o ti pari. Gbogbo eniyan ti gba.`,
+    igbo: (name) => `"${name}": agwula. Onye obula anatala.`,
+    hausa: (name) => `"${name}": an kammala. Kowa ya karba.`,
+  },
+  // s = { name, round, total, position, collected, paid, paidCount, due, late }
+  esusuStatusActive: {
+    english: (s) => `"${s.name}": round ${s.round} of ${s.total}, ${s.paidCount} paid so far. ` +
+      (s.collected ? `You've already collected. ` : s.position === s.round ? `It's your turn to collect this round! ` : `You collect in round ${s.position}. `) +
+      (s.paid ? `You've paid this round.` : s.late ? `⚠️ Your payment was due ${s.due}. You're late.` : `Your payment is due by ${s.due}.`),
+    pidgin: (s) => `"${s.name}": round ${s.round} of ${s.total}, ${s.paidCount} don pay. ` +
+      (s.collected ? `You don collect already. ` : s.position === s.round ? `Na your turn to collect this round! ` : `You go collect for round ${s.position}. `) +
+      (s.paid ? `You don pay for this round.` : s.late ? `⚠️ Your payment suppose enter ${s.due}. You don late.` : `Pay before ${s.due}.`),
+    yoruba: (s) => `"${s.name}": iyipo ${s.round} ninu ${s.total}, eniyan ${s.paidCount} ti san. ` +
+      (s.collected ? `O ti gba tire. ` : s.position === s.round ? `Iwo lo kan lati gba ni iyipo yii! ` : `Iwo yoo gba ni iyipo ${s.position}. `) +
+      (s.paid ? `O ti san ti iyipo yii.` : s.late ? `⚠️ O ye ko ti san ni ${s.due}. O ti pe.` : `San ki ${s.due} to de.`),
+    igbo: (s) => `"${s.name}": agba ${s.round} n'ime ${s.total}, mmadu ${s.paidCount} akwuola. ` +
+      (s.collected ? `I natala nke gi. ` : s.position === s.round ? `O bu oge gi inata n'agba a! ` : `I ga-anata n'agba ${s.position}. `) +
+      (s.paid ? `I kwuola ugwo agba a.` : s.late ? `⚠️ I kwesiri ikwu ugwo na ${s.due}. I noola azu.` : `Kwuo tupu ${s.due}.`),
+    hausa: (s) => `"${s.name}": zagaye na ${s.round} cikin ${s.total}, mutum ${s.paidCount} sun biya. ` +
+      (s.collected ? `Ka riga ka karba. ` : s.position === s.round ? `Lokacin ka ne na karba a wannan zagaye! ` : `Za ka karba a zagaye na ${s.position}. `) +
+      (s.paid ? `Ka biya na wannan zagaye.` : s.late ? `⚠️ Ya kamata ka biya a ${s.due}. Ka makara.` : `Ka biya kafin ${s.due}.`),
   },
 };
 
