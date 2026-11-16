@@ -148,6 +148,22 @@ export const parseConfirmation = (text) => {
   return null;
 };
 
+// --------- "Speak Yoruba" style language commands ----------
+// Returns a language, "auto", or null. Needs a trigger word before the language
+// name and a short message, so "how do you say thanks in hausa" doesn't switch.
+// Includes Yoruba "so", Igbo "kwuo"/"asusu", Hausa "yi magana"/"harshe".
+const LANGUAGE_COMMAND_RE =
+  /\b(?:speak|talk|reply|respond|answer|switch|change|use|set|language|lang|so|soro|kwuo|asusu|yi magana|harshe)\b.*?\b(english|pidgin|yoruba|igbo|hausa|auto|automatic)\b/;
+const MAX_LANGUAGE_COMMAND_WORDS = 8;
+
+export const parseLanguageCommand = (text) => {
+  const clean = normalize(text);
+  if (clean.split(/\s+/).length > MAX_LANGUAGE_COMMAND_WORDS) return null;
+  const m = clean.match(LANGUAGE_COMMAND_RE);
+  if (!m) return null;
+  return m[1] === "automatic" ? "auto" : m[1];
+};
+
 // --------- Intent (Gemini) ----------
 const INTENT_SCHEMA = {
   type: "OBJECT",

@@ -1,5 +1,21 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { api, loadSession, saveSession, clearSession, UNAUTHORIZED_EVENT } from "./api";
+import {
+  LANGUAGE_OPTIONS, SPEECH_CODES, languageLabel, ui, loadLanguageChoice, saveLanguageChoice,
+} from "./i18n";
+
+// Picks a browser voice for the language. Most browsers have no Yoruba, Igbo or
+// Hausa voice; then the (accent-stripped) text is read by a Nigerian/English voice.
+const pickVoice = (code) => {
+  const voices = window.speechSynthesis.getVoices();
+  const lower = code.toLowerCase();
+  const base = lower.split("-")[0];
+  return (
+    voices.find((v) => v.lang.toLowerCase() === lower) ||
+    voices.find((v) => v.lang.toLowerCase().startsWith(`${base}-`)) ||
+    null
+  );
+};
 
 export default function App() {
   const [username, setUsername] = useState("");
@@ -12,6 +28,11 @@ export default function App() {
   const [isThinking, setIsThinking] = useState(false);
   // True while SARA is waiting for "yes"/"no" on a transfer or airtime purchase
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
+  // The language SARA is currently replying in, the saved preference
+  // ("auto" or a language), and an offer to switch when the user writes in another one.
+  const [language, setLanguage] = useState("english");
+  const [languagePref, setLanguagePref] = useState(() => loadLanguageChoice());
+  const [languageSuggestion, setLanguageSuggestion] = useState(null);
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const chatEndRef = useRef(null);
@@ -27,10 +48,23 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // ------------------------- Language -------------------------
+  // Every server reply says which language it used; keep the UI in step.
+  const applyLanguage = (data) => {
+    if (data?.language) setLanguage(data.language);
+    if (data?.languagePreference) {
+      setLanguagePref(data.languagePreference);
+      saveLanguageChoice(data.languagePreference);
+    }
+    setLanguageSuggestion(data?.languageSuggestion ?? null);
+  };
+
+  const addAssistantMessage = (text) => setMessages((prev) => [...prev, { role: "assistant", text }]);
+
   // ------------------------- TTS -------------------------
-  const speakText = (text) => {
-    if (!("speechSynthesis" in window)) return;
-    
+  const speakText = (text, lang = language) => {
+    if (!("speechSynthesis" in window) || !text) return;
+
     // Remove emojis and special characters for speech
     const cleanText = text
       .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis (proper unicode range)
@@ -38,38 +72,70 @@ export default function App() {
       .replace(/[\u{2700}-\u{27BF}]/gu, '') // Remove dingbats
       .replace(/₦/g, 'Naira ') // Replace Naira symbol with word
       .trim();
-    
+
     const utter = new SpeechSynthesisUtterance(cleanText);
+    const voice = pickVoice(SPEECH_CODES[lang] || "en-NG");
+    if (voice) {
+      utter.voice = voice;
+      utter.lang = voice.lang;
+    } else {
+      utter.lang = "en-NG";
+    }
     utter.rate = 1.1;
     utter.pitch = 1.0;
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utter);
   };
 
-  // ------------------------- Auth -------------------------
-  const handleSignup = async () => {
-    if (!username || !password) return alert("Please enter both username and password");
+  // Shows and speaks a server reply (success or error) and syncs the language.
+  const showReply = (data, fallbackText) => {
+    const text = data?.message || fallbackText;
+    addAssistantMessage(text);
+    applyLanguage(data);
+    speakText(data?.speak || text, data?.language || language);
+  };
+
+  // Sent with signup/login so their messages come back in the chosen language.
+  const loginLanguage = () => (languagePref !== "auto" ? languagePref : undefined);
+
+  const changeLanguage = async (value) => {
+    setLanguageSuggestion(null);
+    if (!isLoggedIn) {
+      setLanguagePref(value);
+      saveLanguageChoice(value);
+      return;
+    }
     try {
-      const res = await api.post(`/signup`, { username, password });
+      const res = await api.put("/me/language", { language: value });
+      showReply(res.data);
+    } catch (err) {
+      showReply(err.response?.data, ui("genericError", language));
+    }
+  };
+
+  // ------------------------- Auth -------------------------
+  // Field validation happens on the server so its messages are translated.
+  const handleSignup = async () => {
+    try {
+      const res = await api.post(`/signup`, { username, password, language: loginLanguage() });
       alert(res.data.message);
     } catch (err) {
-      alert(err.response?.data?.message || "Signup failed");
+      alert(err.response?.data?.message || ui("genericError", language));
     }
   };
 
   const handleLogin = async () => {
-    if (!username || !password) return alert("Please enter both username and password");
     try {
-      const res = await api.post(`/login`, { username, password });
+      const res = await api.post(`/login`, { username, password, language: loginLanguage() });
       saveSession({ token: res.data.token, username: res.data.username });
       setUsername(res.data.username);
       setPassword("");
       setIsLoggedIn(true);
-      const welcomeMsg = res.data.welcomeMessage || `Hi ${res.data.username}! I'm SARA, your financial assistant.`;
-      setMessages([{ role: "assistant", text: welcomeMsg }]);
-      speakText(welcomeMsg);
+      applyLanguage(res.data);
+      setMessages([{ role: "assistant", text: res.data.welcomeMessage }]);
+      speakText(res.data.welcomeMessage, res.data.language);
     } catch (err) {
-      alert(err.response?.data?.message || "Login failed");
+      alert(err.response?.data?.message || ui("genericError", language));
     }
   };
 
@@ -79,6 +145,7 @@ export default function App() {
     setIsLoggedIn(false);
     setMessages([]);
     setAwaitingConfirm(false);
+    setLanguageSuggestion(null);
     setUsername("");
     setPassword("");
     setShowEsusu(false);
@@ -96,20 +163,21 @@ export default function App() {
       .then((res) => {
         setUsername(res.data.username);
         setIsLoggedIn(true);
-        setMessages([{
-          role: "assistant",
-          text: `Welcome back, ${res.data.username}! Your balance is ₦${res.data.balance.toLocaleString()}. How can I help?`,
-        }]);
+        applyLanguage(res.data);
+        setMessages([{ role: "assistant", text: res.data.welcomeMessage }]);
       })
       .catch(() => clearSession())
       .finally(() => setIsRestoring(false));
+    // applyLanguage only calls state setters, so running once on mount is correct.
   }, []);
 
   // The API client fires this when the server rejects the token (expired/invalid).
+  const languageRef = useRef(language);
+  languageRef.current = language;
   useEffect(() => {
-    const onUnauthorized = (e) => {
+    const onUnauthorized = () => {
       logout();
-      alert(e.detail || "Your session has expired. Please log in again.");
+      alert(ui("sessionExpired", languageRef.current));
     };
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
@@ -120,7 +188,7 @@ export default function App() {
     try {
       const res = await api.get(`/esusu/my-groups`);
       setEsusuGroups(res.data.groups || []);
-    } catch (err) {
+    } catch {
       console.error("Could not fetch esusu groups");
     }
   };
@@ -133,39 +201,30 @@ export default function App() {
         frequency,
         totalMembers: parseInt(members)
       });
-      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
-      speakText(res.data.speak || res.data.message);
+      showReply(res.data);
       fetchEsusuGroups();
     } catch (err) {
-      const errorMsg = err.response?.data?.message || "Could not create group";
-      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
-      speakText(errorMsg);
+      showReply(err.response?.data, ui("genericError", language));
     }
   };
 
   const joinEsusuGroup = async (groupName) => {
     try {
       const res = await api.post(`/esusu/join`, { groupName });
-      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
-      speakText(res.data.speak || res.data.message);
+      showReply(res.data);
       fetchEsusuGroups();
     } catch (err) {
-      const errorMsg = err.response?.data?.message || "Could not join group";
-      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
-      speakText(errorMsg);
+      showReply(err.response?.data, ui("genericError", language));
     }
   };
 
   const contributeToEsusu = async (groupName) => {
     try {
       const res = await api.post(`/esusu/contribute`, { groupName });
-      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
-      speakText(res.data.speak || res.data.message);
+      showReply(res.data);
       fetchEsusuGroups();
     } catch (err) {
-      const errorMsg = err.response?.data?.message || "Could not contribute";
-      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
-      speakText(errorMsg);
+      showReply(err.response?.data, ui("genericError", language));
     }
   };
 
@@ -182,7 +241,7 @@ export default function App() {
 
     // Check if file is an image
     if (!file.type.startsWith('image/')) {
-      alert('Please upload an image file');
+      alert(ui("notAnImage", language));
       return;
     }
 
@@ -206,10 +265,9 @@ export default function App() {
         });
 
         setScannedBill(res.data.billData);
-        setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
-        speakText(res.data.speak || res.data.message);
+        showReply(res.data);
       } catch (err) {
-        alert('Failed to scan bill. Please try again.');
+        alert(err.response?.data?.message || ui("scanFailed", language));
       } finally {
         setIsScanning(false);
       }
@@ -225,117 +283,67 @@ export default function App() {
         billData: scannedBill
       });
 
-      setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
-      speakText(res.data.speak || res.data.message);
+      showReply(res.data);
       setScannedBill(null);
       setShowBillScanner(false);
     } catch (err) {
-      const errorMsg = err.response?.data?.message || "Payment failed";
-      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
-      speakText(errorMsg);
+      showReply(err.response?.data, ui("genericError", language));
     }
   };
 
   // ------------------------- Fetch History -------------------------
+  // The server formats and translates the history.
   const fetchHistory = async () => {
     setIsThinking(true);
     try {
       const res = await api.get(`/history`);
-      
-      if (!res.data.transactions || res.data.transactions.length === 0) {
-        setMessages((prev) => [...prev, { 
-          role: "assistant", 
-          text: "You don't have any transaction history yet. Start by checking your balance or making a transaction!" 
-        }]);
-        speakText("You have no transactions yet.");
-      } else {
-        const historyText = "📊 Here's your recent transaction history:\n\n" + 
-          res.data.transactions
-            .map((t) => {
-              const date = new Date(t.date).toLocaleString('en-NG', {
-                month: 'short',
-                day: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit'
-              });
-              
-              let emoji = "💳";
-              if (t.type === "Airtime") emoji = "📱";
-              if (t.type === "Transfer") emoji = "💸";
-              if (t.type === "Received") emoji = "💰";
-              
-              return `${emoji} ${date} — ${t.type} ₦${t.amount.toLocaleString()}${
-                t.to_user && t.to_user !== "Self" ? " → " + t.to_user : ""
-              }`;
-            })
-            .join("\n");
-        
-        setMessages((prev) => [...prev, { role: "assistant", text: historyText }]);
-        speakText("Here's your transaction history.");
-      }
+      showReply(res.data);
     } catch (err) {
-      setMessages((prev) => [...prev, { 
-        role: "assistant", 
-        text: "Oops! I couldn't fetch your transaction history. Please try again." 
-      }]);
-      speakText("Could not fetch history.");
+      showReply(err.response?.data, ui("genericError", language));
     } finally {
       setIsThinking(false);
     }
   };
 
   // ------------------------- Send Action -------------------------
-  const handleSend = async (explicitText) => {
+  // quick: true for the quick-action buttons. Their text is fixed English, so the
+  // server shouldn't treat it as the user switching to English.
+  const handleSend = async (explicitText, { quick = false } = {}) => {
     const text = explicitText ?? input;
-    if (!text.trim()) return;
-    
-    if (!isLoggedIn) {
-      setMessages((prev) => [...prev, { 
-        role: "assistant", 
-        text: "Please login first to use SARA's services." 
-      }]);
-      return;
-    }
+    if (!text.trim() || !isLoggedIn) return;
 
     setMessages((prev) => [...prev, { role: "user", text }]);
     setInput("");
     setIsThinking(true);
 
     try {
-      const res = await api.post(`/action`, { text });
-      const reply = res.data.message;
-      setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
+      const res = await api.post(`/action`, { text, quick });
+      showReply(res.data);
       setAwaitingConfirm(Boolean(res.data.awaitingConfirmation));
-      
-      // Use the speak version if available, otherwise clean the message
-      const speechText = res.data.speak || reply;
-      speakText(speechText);
     } catch (err) {
-      const errorMsg = err.response?.data?.message || "Sorry, something went wrong. Please try again.";
-      setMessages((prev) => [...prev, { role: "assistant", text: errorMsg }]);
+      showReply(err.response?.data, ui("genericError", language));
       setAwaitingConfirm(false);
-      speakText(errorMsg);
     } finally {
       setIsThinking(false);
     }
   };
 
   // ------------------------- Speech recognition -------------------------
-  const startListening = useCallback(() => {
+  // Listens in the current language. If the browser can't recognise it (common
+  // for Yoruba, Igbo and Hausa), falls back to Nigerian English.
+  const startListening = (code = SPEECH_CODES[language] || "en-NG") => {
     if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
-      setMessages((prev) => [...prev, { 
-        role: "assistant", 
-        text: "Sorry, voice input is not supported in your browser. Try Chrome or Edge!" 
-      }]);
+      addAssistantMessage(ui("voiceUnsupported", language));
       return;
     }
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-    recognition.lang = "en-NG";
+    recognition.lang = code;
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
+    let fallingBack = false;
     recognition.onstart = () => setIsListening(true);
     recognition.onresult = (event) => {
       const transcript = event.results[0][0].transcript;
@@ -343,18 +351,23 @@ export default function App() {
       recognition.stop();
       handleSend(transcript);
     };
-    recognition.onerror = () => {
+    recognition.onerror = (event) => {
       setIsListening(false);
-      setMessages((prev) => [...prev, { 
-        role: "assistant", 
-        text: "I couldn't hear that clearly. Please try again." 
-      }]);
+      if (event.error === "language-not-supported" && code !== "en-NG") {
+        fallingBack = true;
+        addAssistantMessage(ui("voiceLanguageFallback", language));
+        return;
+      }
+      if (event.error !== "aborted") addAssistantMessage(ui("couldNotHear", language));
     };
-    recognition.onend = () => setIsListening(false);
+    recognition.onend = () => {
+      setIsListening(false);
+      if (fallingBack) startListening("en-NG");
+    };
 
     recognitionRef.current = recognition;
     recognition.start();
-  }, [username, isLoggedIn]);
+  };
 
   const stopListening = () => {
     try {
@@ -364,6 +377,19 @@ export default function App() {
     }
     setIsListening(false);
   };
+
+  const languagePicker = (
+    <select
+      value={languagePref}
+      onChange={(e) => changeLanguage(e.target.value)}
+      style={styles.languageSelect}
+      aria-label="Language"
+    >
+      {LANGUAGE_OPTIONS.map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  );
 
   // ------------------------- Render -------------------------
   if (isRestoring) {
@@ -379,8 +405,11 @@ export default function App() {
       <div style={styles.container}>
         <div style={styles.card}>
           <div style={styles.header}>
-            <h1 style={styles.title}>💸 SARA</h1>
-            <p style={styles.subtitle}>Your Personal Financial Assistant</p>
+            <div>
+              <h1 style={styles.title}>💸 SARA</h1>
+              <p style={styles.subtitle}>Your Personal Financial Assistant</p>
+            </div>
+            {languagePicker}
           </div>
           <input
             placeholder="Username"
@@ -419,7 +448,8 @@ export default function App() {
         <div style={styles.header}>
           <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button 
+            {languagePicker}
+            <button
               onClick={() => {
                 setShowEsusu(false);
                 setShowBillScanner(!showBillScanner);
@@ -486,7 +516,7 @@ export default function App() {
               ))}
               {isThinking && (
                 <div style={{ ...styles.bubble, background: "#4b5563" }}>
-                  SARA is thinking...
+                  {ui("thinking", language)}
                 </div>
               )}
               <div ref={chatEndRef} />
@@ -499,28 +529,46 @@ export default function App() {
                   style={styles.confirmYes}
                   disabled={isThinking}
                 >
-                  ✅ Yes, confirm
+                  {ui("confirmYes", language)}
                 </button>
                 <button
                   onClick={() => handleSend("no")}
                   style={styles.confirmNo}
                   disabled={isThinking}
                 >
-                  ❌ No, cancel
+                  {ui("confirmNo", language)}
+                </button>
+              </div>
+            )}
+
+            {languageSuggestion && (
+              <div style={styles.confirmBar}>
+                <button
+                  onClick={() => changeLanguage(languageSuggestion)}
+                  style={styles.quickButton}
+                >
+                  🌐 {ui("switchTo", languageSuggestion, languageLabel(languageSuggestion))}
+                </button>
+                <button
+                  onClick={() => setLanguageSuggestion(null)}
+                  style={styles.backButton}
+                  aria-label="Dismiss"
+                >
+                  ✕
                 </button>
               </div>
             )}
 
             <div style={styles.quickActions}>
               <button 
-                onClick={() => handleSend("check balance")} 
+                onClick={() => handleSend("check balance", { quick: true })}
                 style={styles.quickButton}
                 disabled={isThinking}
               >
                 💰 Balance
               </button>
               <button 
-                onClick={() => handleSend("buy 100 airtime")} 
+                onClick={() => handleSend("buy 100 airtime", { quick: true })}
                 style={styles.quickButton}
                 disabled={isThinking}
               >
@@ -552,7 +600,7 @@ export default function App() {
                 Send
               </button>
               <button 
-                onClick={isListening ? stopListening : startListening} 
+                onClick={isListening ? stopListening : () => startListening()} 
                 style={{
                   ...styles.micButton,
                   background: isListening ? "#ef4444" : "#7c3aed"
@@ -939,6 +987,15 @@ const styles = {
     lineHeight: 1.5, 
     whiteSpace: "pre-wrap",
     boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+  },
+  languageSelect: {
+    padding: "8px 12px",
+    borderRadius: 8,
+    border: "1px solid rgba(124,58,237,0.3)",
+    background: "#0b1220",
+    color: "#a78bfa",
+    cursor: "pointer",
+    fontSize: 14,
   },
   confirmBar: {
     display: "flex",

@@ -51,17 +51,15 @@ export const requireSameUser = (req, res, next) => {
 // Same character set the chat uses to recognise recipients ("send 500 to ada_b").
 export const USERNAME_RE = /^[A-Za-z0-9_.]{3,20}$/;
 export const MIN_PASSWORD_LENGTH = 6;
+export const MAX_PASSWORD_LENGTH = 72; // bcrypt ignores bytes beyond 72
 
+// Returns null if valid, otherwise [messageKey, ...args] for t() in messages.js.
 export const validateSignup = (username, password) => {
-  if (typeof username !== "string" || !USERNAME_RE.test(username)) {
-    return "Username must be 3-20 characters: letters, numbers, _ or . only.";
-  }
+  if (typeof username !== "string" || !USERNAME_RE.test(username)) return ["usernameInvalid"];
   if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
-    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`;
+    return ["passwordTooShort", MIN_PASSWORD_LENGTH];
   }
-  if (password.length > 72) {
-    return "Password must be at most 72 characters."; // bcrypt ignores bytes beyond 72
-  }
+  if (password.length > MAX_PASSWORD_LENGTH) return ["passwordTooLong", MAX_PASSWORD_LENGTH];
   return null;
 };
 

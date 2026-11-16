@@ -120,3 +120,27 @@ test("every message exists in every language", () => {
     assert.ok(t("cancelled", lang));
   }
 });
+
+test("parseLanguageCommand recognises short switch requests", async () => {
+  const { parseLanguageCommand } = await import("../nlu.js");
+  assert.equal(parseLanguageCommand("speak yoruba"), "yoruba");
+  assert.equal(parseLanguageCommand("Talk to me in Pidgin abeg"), "pidgin");
+  assert.equal(parseLanguageCommand("switch to Hausa"), "hausa");
+  assert.equal(parseLanguageCommand("change language to english"), "english");
+  assert.equal(parseLanguageCommand("use pidgin english"), "pidgin");   // first name wins
+  assert.equal(parseLanguageCommand("sọ Yorùbá"), "yoruba");           // Yoruba "speak"
+  assert.equal(parseLanguageCommand("kwuo igbo"), "igbo");             // Igbo "speak"
+  assert.equal(parseLanguageCommand("language auto"), "auto");
+  assert.equal(parseLanguageCommand("yoruba"), null);                 // no trigger word
+  assert.equal(parseLanguageCommand("send 500 to bola"), null);
+  assert.equal(parseLanguageCommand("please can you tell me how people use money in the yoruba culture"), null); // too long
+});
+
+test("every message key is translated into all five languages", async () => {
+  const { messages } = await import("../messages.js");
+  for (const [key, entry] of Object.entries(messages)) {
+    for (const lang of ["english", "pidgin", "yoruba", "igbo", "hausa"]) {
+      assert.equal(typeof entry[lang], "function", `${key}.${lang} missing`);
+    }
+  }
+});

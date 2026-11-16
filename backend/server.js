@@ -2,8 +2,8 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import pkg from 'pg';
-import { parseIntent, parseConfirmation, detectLanguage, removeAccents } from "./nlu.js";
-import { t, naira } from "./messages.js";
+import { parseIntent, parseConfirmation, parseLanguageCommand, removeAccents, LANGUAGES } from "./nlu.js";
+import { t, naira, billTypeName, LANGUAGE_NAMES } from "./messages.js";
 import { signToken, requireAuth, requireSameUser, validateSignup, createRateLimiter } from "./auth.js";
 const { Pool } = pkg;
 
@@ -112,6 +112,12 @@ const createTables = async () => {
       )
     `);
 
+    // language: the user's chosen language, or NULL for "auto" (follow what they write).
+    // last_language: the language detected most recently, used in auto mode and by
+    // screens that have no text to detect from (bills, esusu).
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_language TEXT`);
+
     console.log('All tables created successfully');
   } catch (err) {
     console.error('Error creating tables:', err);
@@ -119,6 +125,27 @@ const createTables = async () => {
 };
 
 createTables();
+
+// --------- Language ----------
+const isLanguage = (value) => LANGUAGES.includes(value);
+const effectiveLanguage = (user) =>
+  (isLanguage(user?.language) && user.language) || (isLanguage(user?.last_language) && user.last_language) || "english";
+
+// For signup/login: the language picked on the login screen.
+const requestLanguage = (req) => (isLanguage(req.body?.language) ? req.body.language : "english");
+
+// After requireAuth: loads the user's reply language into req.lang.
+const loadLanguage = async (req, res, next) => {
+  try {
+    const { rows } = await pool.query("SELECT language, last_language FROM users WHERE username=$1", [req.username]);
+    req.lang = effectiveLanguage(rows[0]);
+  } catch {
+    req.lang = "english";
+  }
+  next();
+};
+
+const fail = (res, status, lang, key, ...args) => res.status(status).json({ message: t(key, lang, ...args) });
 
 // --------- Helpers ----------
 const toSpeech = (text, maxLen = 300) => {
@@ -255,16 +282,7 @@ const formatHistory = (rows, lang) => {
 
 // --------- Gemini AI Function ----------
 async function getGeminiAdvice(userQuery, userContext, language) {
-  if (!GEMINI_API_KEY) {
-    const responses = {
-      english: "I'd love to give you financial advice, but my AI brain needs to be activated first. Ask your admin to add a Gemini API key!",
-      pidgin: "I wan give you advice, but my AI brain never activate yet. Tell your admin make e add Gemini API key!",
-      yoruba: "Mo fẹ́ fún ọ ní ìmọ̀ràn, ṣùgbọ́n kò tí ì múlẹ̀. Sọ fún admin láti fi API key sí!",
-      igbo: "Achọrọ m inye gị ndụmọdụ, mana AI m amalitebeghị. Gwa admin ka o tinye Gemini API key!",
-      hausa: "Ina so in ba ku shawara, amma AI na bai fara aiki ba. Gaya wa admin ya sanya Gemini API key!"
-    };
-    return responses[language] || responses.english;
-  }
+  if (!GEMINI_API_KEY) return t("aiUnavailable", language);
 
   try {
     let languageInstruction = '';
@@ -325,17 +343,10 @@ Keep response:
       return text;
     }
 
-    return "I'm having trouble thinking right now. Please try asking again!";
+    return t("aiError", language);
   } catch (error) {
     console.error("Gemini error:", error);
-    const responses = {
-      english: "Sorry, I'm having trouble connecting to my AI brain. Try again in a moment!",
-      pidgin: "Sorry o! My AI brain no dey work well now. Try again small!",
-      yoruba: "Má bínú! AI mi kò ṣiṣẹ́ dáadáa báyìí. Gbìyànjú padà!",
-      igbo: "Ndo! AI m anaghị arụ ọrụ ugbu a. Gbalịa ọzọ!",
-      hausa: "Yi hakuri! AI na baya aiki sosai yanzu. Sake gwadawa!"
-    };
-    return responses[language] || responses.english;
+    return t("aiError", language);
   }
 }
 
@@ -347,43 +358,54 @@ const signupLimiter = createRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
 // doesn't reveal which usernames are registered.
 const DUMMY_HASH = bcrypt.hashSync("not-a-real-password", 10);
 
-const welcomeMessage = (username) =>
-  `Hi ${username}! I'm SARA. I speak English, Pidgin, Yoruba, Igbo, and Hausa. I can help with payments, savings, and financial advice!`;
+// What the frontend needs to know about the user's language settings.
+const languageInfo = (user) => ({
+  languagePreference: isLanguage(user.language) ? user.language : "auto",
+  language: effectiveLanguage(user),
+});
 
 app.post("/signup", async (req, res) => {
+  const lang = requestLanguage(req);
   const { username, password } = req.body;
   const invalid = validateSignup(username, password);
-  if (invalid) return res.status(400).json({ message: invalid });
+  if (invalid) return fail(res, 400, lang, ...invalid);
 
   const wait = signupLimiter.check(req.ip);
-  if (wait) return res.status(429).json({ message: `Too many signups. Try again in ${Math.ceil(wait / 60)} minutes.` });
+  if (wait) return fail(res, 429, lang, "tooManySignups", Math.ceil(wait / 60));
+
+  // A language picked on the login screen becomes the saved preference.
+  const preference = isLanguage(req.body.language) ? req.body.language : null;
 
   try {
     // Usernames are unique regardless of case, so "Ada" and "ada" can't both exist
     // (the chat looks recipients up case-insensitively).
     const taken = await pool.query("SELECT 1 FROM users WHERE LOWER(username)=LOWER($1)", [username]);
-    if (taken.rows.length) return res.status(400).json({ message: "Username already exists" });
+    if (taken.rows.length) return fail(res, 400, lang, "usernameTaken");
 
     const hashed = await bcrypt.hash(password, 10);
-    await pool.query("INSERT INTO users(username, password) VALUES($1, $2)", [username, hashed]);
+    await pool.query(
+      "INSERT INTO users(username, password, language, last_language) VALUES($1, $2, $3, $3)",
+      [username, hashed, preference]
+    );
     signupLimiter.fail(req.ip); // counts successful signups
-    res.json({ message: "Account created successfully! You can now login." });
+    res.json({ message: t("signupSuccess", lang) });
   } catch (err) {
-    if (err.code === "23505") return res.status(400).json({ message: "Username already exists" });
+    if (err.code === "23505") return fail(res, 400, lang, "usernameTaken");
     console.error("Signup error:", err);
-    res.status(500).json({ message: "Signup failed. Please try again." });
+    fail(res, 500, lang, "signupFailed");
   }
 });
 
 app.post("/login", async (req, res) => {
+  const lang = requestLanguage(req);
   const { username, password } = req.body;
   if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
-    return res.status(400).json({ message: "Username and password required" });
+    return fail(res, 400, lang, "credentialsRequired");
   }
 
   const limitKey = `${req.ip}:${username.toLowerCase()}`;
   const wait = loginLimiter.check(limitKey);
-  if (wait) return res.status(429).json({ message: `Too many failed attempts. Try again in ${Math.ceil(wait / 60)} minutes.` });
+  if (wait) return fail(res, 429, lang, "tooManyLogins", Math.ceil(wait / 60));
 
   try {
     const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
@@ -392,32 +414,61 @@ app.post("/login", async (req, res) => {
 
     if (!user || !valid) {
       loginLimiter.fail(limitKey);
-      return res.status(400).json({ message: "Invalid username or password" });
+      return fail(res, 400, lang, "invalidCredentials");
     }
 
     loginLimiter.reset(limitKey);
+    const info = languageInfo(user);
     res.json({
       token: signToken(user),
       username: user.username,
       balance: user.balance,
-      message: "Login successful",
-      welcomeMessage: welcomeMessage(user.username),
+      ...info,
+      welcomeMessage: t("welcome", info.language, user.username),
     });
   } catch (err) {
     console.error("Login error:", err);
-    res.status(500).json({ message: "Login failed" });
+    fail(res, 500, lang, "loginFailed");
   }
 });
 
 // Used by the frontend to restore a saved session after a page refresh.
 app.get("/me", requireAuth, async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT username, balance FROM users WHERE username=$1", [req.username]);
-    if (!rows.length) return res.status(401).json({ message: "Account not found. Please log in again." });
-    res.json({ username: rows[0].username, balance: rows[0].balance });
+    const { rows } = await pool.query("SELECT * FROM users WHERE username=$1", [req.username]);
+    if (!rows.length) return fail(res, 401, "english", "accountNotFound");
+    const info = languageInfo(rows[0]);
+    res.json({
+      username: rows[0].username,
+      balance: rows[0].balance,
+      ...info,
+      welcomeMessage: t("welcomeBack", info.language, rows[0].username, rows[0].balance),
+    });
   } catch (err) {
     console.error("Me error:", err);
-    res.status(500).json({ message: "Could not load your account" });
+    fail(res, 500, "english", "serverError");
+  }
+});
+
+// Set the reply language: one of LANGUAGES, or "auto" to follow what the user writes.
+app.put("/me/language", requireAuth, loadLanguage, async (req, res) => {
+  const { language } = req.body;
+  if (language !== "auto" && !isLanguage(language)) return fail(res, 400, req.lang, "invalidLanguage");
+
+  const preference = language === "auto" ? null : language;
+  try {
+    const { rows } = await pool.query(
+      "UPDATE users SET language=$1, last_language=COALESCE($1, last_language) WHERE username=$2 RETURNING *",
+      [preference, req.username]
+    );
+    const info = languageInfo(rows[0]);
+    const message = preference
+      ? t("languageChanged", info.language, LANGUAGE_NAMES[info.language])
+      : t("languageAuto", info.language);
+    res.json({ ...info, message, speak: toSpeech(message) });
+  } catch (err) {
+    console.error("Set language error:", err);
+    fail(res, 500, req.lang, "serverError");
   }
 });
 
@@ -425,30 +476,41 @@ app.get("/me", requireAuth, async (req, res) => {
 // Flow: (1) if the message is a yes/no, resolve the pending action;
 // (2) otherwise parse intent (Gemini, regex fallback); (3) money-moving intents
 // are never executed directly — they create a pending action and ask to confirm.
+// Language: a saved preference always wins. In "auto" mode the reply follows the
+// language of the message, except for quick-action buttons (fixed English text),
+// which keep the current language. If a user with a preference writes in another
+// Nigerian language, the reply offers to switch (languageSuggestion) but doesn't.
 app.post("/action", requireAuth, async (req, res) => {
   const username = req.username;
   const { text } = req.body;
-  if (typeof text !== "string" || !text.trim()) {
-    return res.status(400).json({ message: "Missing parameters" });
-  }
+  const quick = req.body.quick === true;
 
   try {
     const user = (await pool.query("SELECT * FROM users WHERE username=$1", [username])).rows[0];
-    if (!user) {
-      return res.status(400).json({ message: "User not found" });
-    }
+    if (!user) return fail(res, 401, "english", "accountNotFound");
 
+    let preference = isLanguage(user.language) ? user.language : null;
+    const current = effectiveLanguage(user);
+
+    if (typeof text !== "string" || !text.trim()) return fail(res, 400, current, "missingText");
+
+    let languageSuggestion; // set below if the user writes in a different language
     const reply = (language, message, extra = {}) =>
-      res.json({ message, speak: toSpeech(message), language, balance: user.balance, ...extra });
+      res.json({
+        message,
+        speak: toSpeech(message),
+        language,
+        languagePreference: preference ?? "auto",
+        balance: user.balance,
+        ...(languageSuggestion && { languageSuggestion }),
+        ...extra,
+      });
 
-    // 1. Yes / no to a pending confirmation
+    // 1. Yes / no to a pending confirmation (answered in the language it was asked in)
     const answer = parseConfirmation(text);
     if (answer) {
       const pending = await takePendingAction(username);
-      if (!pending) {
-        const lang = detectLanguage(text);
-        return reply(lang, t("nothingToConfirm", lang));
-      }
+      if (!pending) return reply(current, t("nothingToConfirm", current));
       const lang = pending.language;
       if (!pending.valid) return reply(lang, t("expired", lang));
       if (answer === "no") return reply(lang, t("cancelled", lang));
@@ -460,10 +522,35 @@ app.post("/action", requireAuth, async (req, res) => {
     // Any other message drops an earlier unconfirmed request.
     await clearPendingAction(username);
 
-    // 2. Understand the message
+    // 2. "Speak Yoruba" / "reply in auto"
+    const command = parseLanguageCommand(text);
+    if (command) {
+      preference = command === "auto" ? null : command;
+      await pool.query(
+        "UPDATE users SET language=$1, last_language=COALESCE($1, last_language) WHERE username=$2",
+        [preference, username]
+      );
+      const lang = preference ?? current;
+      return reply(lang, preference ? t("languageChanged", lang, LANGUAGE_NAMES[lang]) : t("languageAuto", lang));
+    }
+
+    // 3. Understand the message
     const parsed = await parseIntent(text, geminiOpts);
-    const lang = parsed.language;
+    const detected = parsed.language;
     console.log(`Intent (${parsed.source}):`, JSON.stringify(parsed));
+
+    let lang;
+    if (preference) {
+      lang = preference;
+      if (!quick && detected !== preference && detected !== "english") languageSuggestion = detected;
+    } else if (quick) {
+      lang = current;
+    } else {
+      lang = detected;
+      if (detected !== user.last_language) {
+        await pool.query("UPDATE users SET last_language=$1 WHERE username=$2", [detected, username]);
+      }
+    }
 
     switch (parsed.intent) {
       case "balance":
@@ -503,8 +590,9 @@ app.post("/action", requireAuth, async (req, res) => {
           "SELECT * FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 10",
           [username]
         );
-        const message = formatHistory(rows, lang);
-        return res.json({ message, speak: toSpeech(t(rows.length ? "historyHeader" : "historyEmpty", lang)), language: lang, balance: user.balance });
+        return reply(lang, formatHistory(rows, lang), {
+          speak: toSpeech(t(rows.length ? "historyHeader" : "historyEmpty", lang)),
+        });
       }
 
       case "greeting":
@@ -534,13 +622,14 @@ Language preference: ${lang}
     }
   } catch (err) {
     console.error("Action error:", err);
-    res.status(500).json({ message: "Server error. Please try again." });
+    fail(res, 500, "english", "serverError");
   }
 });
 
 // --------- Transaction History ----------
 // "/history/:username" is kept for old clients but only works for your own username.
-app.get(["/history", "/history/:username"], requireAuth, requireSameUser, async (req, res) => {
+// Returns the raw rows plus a ready-to-show, translated message.
+app.get(["/history", "/history/:username"], requireAuth, requireSameUser, loadLanguage, async (req, res) => {
   const username = req.username;
 
   try {
@@ -548,20 +637,24 @@ app.get(["/history", "/history/:username"], requireAuth, requireSameUser, async 
       "SELECT * FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 20",
       [username]
     );
-    res.json({ transactions: result.rows });
+    res.json({
+      transactions: result.rows,
+      message: formatHistory(result.rows, req.lang),
+      speak: toSpeech(t(result.rows.length ? "historyHeader" : "historyEmpty", req.lang)),
+      language: req.lang,
+    });
   } catch (err) {
-    res.status(500).json({ message: "Could not fetch history" });
+    console.error("History error:", err);
+    fail(res, 500, req.lang, "historyFailed");
   }
 });
 
 // --------- Bill Scanner ----------
-app.post("/scan-bill", requireAuth, (req, res) => {
+app.post("/scan-bill", requireAuth, loadLanguage, (req, res) => {
   const username = req.username;
   const { imageData, billType } = req.body;
 
-  if (!imageData) {
-    return res.status(400).json({ message: "Missing required fields" });
-  }
+  if (!imageData) return fail(res, 400, req.lang, "billImageMissing");
 
   const mockBills = {
     electricity: {
@@ -583,15 +676,11 @@ app.post("/scan-bill", requireAuth, (req, res) => {
     }
   };
 
-  const type = billType || "electricity";
-  const billData = mockBills[type] || mockBills.electricity;
+  const type = mockBills[billType] ? billType : "electricity";
+  const billData = mockBills[type];
+  const message = t("billScanned", req.lang, billTypeName(type, req.lang), billData.amount);
 
-  res.json({
-    success: true,
-    billData: billData,
-    message: `I've scanned your ${type} bill! Amount: ₦${billData.amount.toLocaleString()}`,
-    speak: `I've scanned your ${type} bill! The amount is ${billData.amount} Naira.`
-  });
+  res.json({ success: true, billData, message, speak: toSpeech(message), language: req.lang });
 });
 
 // A positive whole-naira amount within limits, or null.
@@ -611,16 +700,17 @@ const debit = async (db, username, amount) => {
 const currentBalance = async (username) =>
   (await pool.query("SELECT balance FROM users WHERE username=$1", [username])).rows[0]?.balance ?? 0;
 
+const MAX_PAYMENT = 1_000_000;
+
 // NOTE: billData still comes from the client (the scanner is a mock). The amount is
 // validated here, but the proper fix is for the server to store scanned bills.
-app.post("/pay-bill", requireAuth, async (req, res) => {
+app.post("/pay-bill", requireAuth, loadLanguage, async (req, res) => {
   const username = req.username;
+  const lang = req.lang;
   const { billData } = req.body;
 
-  const amount = validAmount(billData?.amount, 1_000_000);
-  if (!billData || !amount) {
-    return res.status(400).json({ message: "Invalid bill details" });
-  }
+  const amount = validAmount(billData?.amount, MAX_PAYMENT);
+  if (!billData || !amount) return fail(res, 400, lang, "billInvalid");
 
   try {
     const result = await withTransaction(async (db) => {
@@ -634,45 +724,40 @@ app.post("/pay-bill", requireAuth, async (req, res) => {
     });
 
     if (!result.ok) {
-      const balance = await currentBalance(username);
-      return res.status(400).json({
-        message: `You need ${naira(amount)} but only have ${naira(balance)}.`
-      });
+      return fail(res, 400, lang, "insufficientFunds", await currentBalance(username), amount);
     }
-    const { balance } = result;
 
+    const message = t("billPaid", lang, billData.provider, amount, result.balance);
     res.json({
-      message: `Perfect! Your ${billData.provider} bill of ${naira(amount)} has been paid. New balance: ${naira(balance)}.`,
-      balance,
+      message,
+      speak: toSpeech(message),
+      language: lang,
+      balance: result.balance,
       receiptNumber: "RCP" + Date.now()
     });
   } catch (err) {
     console.error("Pay bill error:", err);
-    res.status(500).json({ message: "Payment failed" });
+    fail(res, 500, lang, "paymentFailed");
   }
 });
 
 // --------- Esusu Endpoints ----------
 const ESUSU_FREQUENCIES = ["daily", "weekly", "monthly"];
+const ESUSU_MEMBERS = { min: 2, max: 50 };
 
-app.post("/esusu/create", requireAuth, async (req, res) => {
+app.post("/esusu/create", requireAuth, loadLanguage, async (req, res) => {
   const username = req.username;
+  const lang = req.lang;
   const { frequency } = req.body;
   const groupName = typeof req.body.groupName === "string" ? req.body.groupName.trim() : "";
-  const amountPerPerson = validAmount(req.body.amountPerPerson, 1_000_000);
+  const amountPerPerson = validAmount(req.body.amountPerPerson, MAX_PAYMENT);
   const totalMembers = Number.isInteger(req.body.totalMembers) ? req.body.totalMembers : null;
 
-  if (!groupName || groupName.length > 50) {
-    return res.status(400).json({ message: "Group name must be 1-50 characters" });
-  }
-  if (!amountPerPerson) {
-    return res.status(400).json({ message: "Amount per person must be between ₦1 and ₦1,000,000" });
-  }
-  if (!ESUSU_FREQUENCIES.includes(frequency)) {
-    return res.status(400).json({ message: "Frequency must be daily, weekly or monthly" });
-  }
-  if (!totalMembers || totalMembers < 2 || totalMembers > 50) {
-    return res.status(400).json({ message: "A group needs between 2 and 50 members" });
+  if (!groupName || groupName.length > 50) return fail(res, 400, lang, "groupNameInvalid");
+  if (!amountPerPerson) return fail(res, 400, lang, "esusuAmountInvalid", MAX_PAYMENT);
+  if (!ESUSU_FREQUENCIES.includes(frequency)) return fail(res, 400, lang, "esusuFrequencyInvalid");
+  if (!totalMembers || totalMembers < ESUSU_MEMBERS.min || totalMembers > ESUSU_MEMBERS.max) {
+    return fail(res, 400, lang, "esusuMembersInvalid", ESUSU_MEMBERS.min, ESUSU_MEMBERS.max);
   }
 
   try {
@@ -680,95 +765,78 @@ app.post("/esusu/create", requireAuth, async (req, res) => {
       "INSERT INTO esusu_groups (group_name, amount_per_person, frequency, total_members, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id",
       [groupName, amountPerPerson, frequency, totalMembers, username]
     );
-    
+
     const groupId = result.rows[0].id;
-    
+
     await pool.query(
       "INSERT INTO esusu_members (group_id, username, position) VALUES ($1, $2, $3)",
       [groupId, username, 1]
     );
 
-    res.json({ 
-      message: `Great! Your esusu group "${groupName}" has been created!`,
-      groupId: groupId
-    });
+    const message = t("groupCreated", lang, groupName);
+    res.json({ message, speak: toSpeech(message), language: lang, groupId });
   } catch (err) {
-    if (err.code === "23505") return res.status(400).json({ message: "Group name already exists" });
+    if (err.code === "23505") return fail(res, 400, lang, "groupNameTaken");
     console.error("Esusu create error:", err);
-    res.status(500).json({ message: "Could not create group" });
+    fail(res, 500, lang, "groupCreateFailed");
   }
 });
 
-app.post("/esusu/join", requireAuth, async (req, res) => {
+app.post("/esusu/join", requireAuth, loadLanguage, async (req, res) => {
   const username = req.username;
+  const lang = req.lang;
   const { groupName } = req.body;
 
   try {
     const groupResult = await pool.query("SELECT * FROM esusu_groups WHERE group_name=$1", [groupName]);
-    
-    if (groupResult.rows.length === 0) {
-      return res.status(400).json({ message: `Group "${groupName}" not found.` });
-    }
+    if (groupResult.rows.length === 0) return fail(res, 400, lang, "groupNotFound", groupName);
 
     const group = groupResult.rows[0];
 
     const existingResult = await pool.query(
-      "SELECT * FROM esusu_members WHERE group_id=$1 AND username=$2", 
+      "SELECT * FROM esusu_members WHERE group_id=$1 AND username=$2",
       [group.id, username]
     );
-    
-    if (existingResult.rows.length > 0) {
-      return res.status(400).json({ message: "You're already in this group!" });
-    }
+    if (existingResult.rows.length > 0) return fail(res, 400, lang, "alreadyMember");
 
     const membersResult = await pool.query("SELECT * FROM esusu_members WHERE group_id=$1", [group.id]);
-    
-    if (membersResult.rows.length >= group.total_members) {
-      return res.status(400).json({ message: "Sorry, this group is full!" });
-    }
+    if (membersResult.rows.length >= group.total_members) return fail(res, 400, lang, "groupFull");
 
     const position = membersResult.rows.length + 1;
-    
+
     await pool.query(
       "INSERT INTO esusu_members (group_id, username, position) VALUES ($1, $2, $3)",
       [group.id, username, position]
     );
 
-    res.json({ 
-      message: `Welcome to "${groupName}"! You're member #${position}.`
-    });
+    const message = t("joinedGroup", lang, groupName, position);
+    res.json({ message, speak: toSpeech(message), language: lang });
   } catch (err) {
-    res.status(500).json({ message: "Could not join group" });
+    console.error("Esusu join error:", err);
+    fail(res, 500, lang, "joinFailed");
   }
 });
 
-app.post("/esusu/contribute", requireAuth, async (req, res) => {
+app.post("/esusu/contribute", requireAuth, loadLanguage, async (req, res) => {
   const username = req.username;
+  const lang = req.lang;
   const { groupName } = req.body;
 
   try {
     const groupResult = await pool.query("SELECT * FROM esusu_groups WHERE group_name=$1", [groupName]);
-
-    if (groupResult.rows.length === 0) {
-      return res.status(400).json({ message: "Group not found" });
-    }
+    if (groupResult.rows.length === 0) return fail(res, 400, lang, "groupNotFound", groupName);
 
     const group = groupResult.rows[0];
     const amount = group.amount_per_person;
 
     const memberResult = await pool.query(
-      "SELECT * FROM esusu_members WHERE group_id=$1 AND username=$2", 
+      "SELECT * FROM esusu_members WHERE group_id=$1 AND username=$2",
       [group.id, username]
     );
-    
-    if (memberResult.rows.length === 0) {
-      return res.status(400).json({ message: "You're not a member of this group!" });
-    }
+    if (memberResult.rows.length === 0) return fail(res, 400, lang, "notMember");
 
     // Groups created before amount validation existed could hold a bad amount.
-    if (!validAmount(amount, 1_000_000)) {
-      return res.status(400).json({ message: "This group has an invalid contribution amount." });
-    }
+    if (!validAmount(amount, MAX_PAYMENT)) return fail(res, 400, lang, "groupBadAmount");
 
     const result = await withTransaction(async (db) => {
       const balance = await debit(db, username, amount);
@@ -787,34 +855,32 @@ app.post("/esusu/contribute", requireAuth, async (req, res) => {
     });
 
     if (!result.ok) {
-      const balance = await currentBalance(username);
-      return res.status(400).json({ message: `You need ${naira(amount)} but only have ${naira(balance)}.` });
+      return fail(res, 400, lang, "insufficientFunds", await currentBalance(username), amount);
     }
 
-    res.json({
-      message: `Perfect! You've contributed ${naira(amount)} to "${groupName}".`,
-      balance: result.balance
-    });
+    const message = t("contributed", lang, amount, groupName, result.balance);
+    res.json({ message, speak: toSpeech(message), language: lang, balance: result.balance });
   } catch (err) {
     console.error("Esusu contribute error:", err);
-    res.status(500).json({ message: "Contribution failed" });
+    fail(res, 500, lang, "contributeFailed");
   }
 });
 
-app.get(["/esusu/my-groups", "/esusu/my-groups/:username"], requireAuth, requireSameUser, async (req, res) => {
+app.get(["/esusu/my-groups", "/esusu/my-groups/:username"], requireAuth, requireSameUser, loadLanguage, async (req, res) => {
   const username = req.username;
 
   try {
     const result = await pool.query(
-      `SELECT g.*, m.position, m.has_collected 
-       FROM esusu_groups g 
-       JOIN esusu_members m ON g.id = m.group_id 
+      `SELECT g.*, m.position, m.has_collected
+       FROM esusu_groups g
+       JOIN esusu_members m ON g.id = m.group_id
        WHERE m.username=$1`,
       [username]
     );
     res.json({ groups: result.rows });
   } catch (err) {
-    res.status(500).json({ message: "Could not fetch groups" });
+    console.error("Esusu groups error:", err);
+    fail(res, 500, req.lang, "groupsFetchFailed");
   }
 });
 
