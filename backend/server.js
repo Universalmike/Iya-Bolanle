@@ -4,11 +4,14 @@ import bcrypt from "bcryptjs";
 import pkg from 'pg';
 import { parseIntent, parseConfirmation, detectLanguage, removeAccents } from "./nlu.js";
 import { t, naira } from "./messages.js";
+import { signToken, requireAuth, requireSameUser, validateSignup, createRateLimiter } from "./auth.js";
 const { Pool } = pkg;
 
 const app = express();
+// Render (and most hosts) sit behind a proxy; needed so req.ip is the real client IP.
+app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "5mb" })); // bill photos are sent as base64
 
 // PostgreSQL connection
 const pool = new Pool({
@@ -337,45 +340,68 @@ Keep response:
 }
 
 // --------- Auth ----------
+// 10 failed logins per IP+username per 15 minutes, and 5 signups per IP per hour.
+const loginLimiter = createRateLimiter({ max: 10, windowMs: 15 * 60 * 1000 });
+const signupLimiter = createRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
+// Compared against when the username doesn't exist, so response time
+// doesn't reveal which usernames are registered.
+const DUMMY_HASH = bcrypt.hashSync("not-a-real-password", 10);
+
+const welcomeMessage = (username) =>
+  `Hi ${username}! I'm SARA. I speak English, Pidgin, Yoruba, Igbo, and Hausa. I can help with payments, savings, and financial advice!`;
+
 app.post("/signup", async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ message: "Username and password required" });
-  }
+  const invalid = validateSignup(username, password);
+  if (invalid) return res.status(400).json({ message: invalid });
 
-  const hashed = bcrypt.hashSync(password, 10);
+  const wait = signupLimiter.check(req.ip);
+  if (wait) return res.status(429).json({ message: `Too many signups. Try again in ${Math.ceil(wait / 60)} minutes.` });
 
   try {
-    await pool.query(
-      "INSERT INTO users(username, password) VALUES($1, $2)",
-      [username, hashed]
-    );
+    // Usernames are unique regardless of case, so "Ada" and "ada" can't both exist
+    // (the chat looks recipients up case-insensitively).
+    const taken = await pool.query("SELECT 1 FROM users WHERE LOWER(username)=LOWER($1)", [username]);
+    if (taken.rows.length) return res.status(400).json({ message: "Username already exists" });
+
+    const hashed = await bcrypt.hash(password, 10);
+    await pool.query("INSERT INTO users(username, password) VALUES($1, $2)", [username, hashed]);
+    signupLimiter.fail(req.ip); // counts successful signups
     res.json({ message: "Account created successfully! You can now login." });
   } catch (err) {
-    res.status(400).json({ message: "Username already exists" });
+    if (err.code === "23505") return res.status(400).json({ message: "Username already exists" });
+    console.error("Signup error:", err);
+    res.status(500).json({ message: "Signup failed. Please try again." });
   }
 });
 
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
+  if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
+    return res.status(400).json({ message: "Username and password required" });
+  }
+
+  const limitKey = `${req.ip}:${username.toLowerCase()}`;
+  const wait = loginLimiter.check(limitKey);
+  if (wait) return res.status(429).json({ message: `Too many failed attempts. Try again in ${Math.ceil(wait / 60)} minutes.` });
 
   try {
     const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
-
-    if (result.rows.length === 0) {
-      return res.status(400).json({ message: "Invalid username or password" });
-    }
-
     const user = result.rows[0];
+    const valid = await bcrypt.compare(password, user ? user.password : DUMMY_HASH);
 
-    if (!bcrypt.compareSync(password, user.password)) {
+    if (!user || !valid) {
+      loginLimiter.fail(limitKey);
       return res.status(400).json({ message: "Invalid username or password" });
     }
 
+    loginLimiter.reset(limitKey);
     res.json({
+      token: signToken(user),
+      username: user.username,
       balance: user.balance,
       message: "Login successful",
-      welcomeMessage: `Hi ${username}! I'm SARA. I speak English, Pidgin, Yoruba, Igbo, and Hausa. I can help with payments, savings, and financial advice!`
+      welcomeMessage: welcomeMessage(user.username),
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -383,13 +409,26 @@ app.post("/login", async (req, res) => {
   }
 });
 
+// Used by the frontend to restore a saved session after a page refresh.
+app.get("/me", requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT username, balance FROM users WHERE username=$1", [req.username]);
+    if (!rows.length) return res.status(401).json({ message: "Account not found. Please log in again." });
+    res.json({ username: rows[0].username, balance: rows[0].balance });
+  } catch (err) {
+    console.error("Me error:", err);
+    res.status(500).json({ message: "Could not load your account" });
+  }
+});
+
 // --------- Main Action Endpoint ----------
 // Flow: (1) if the message is a yes/no, resolve the pending action;
 // (2) otherwise parse intent (Gemini, regex fallback); (3) money-moving intents
 // are never executed directly — they create a pending action and ask to confirm.
-app.post("/action", async (req, res) => {
-  const { username, text } = req.body;
-  if (!username || typeof text !== "string" || !text.trim()) {
+app.post("/action", requireAuth, async (req, res) => {
+  const username = req.username;
+  const { text } = req.body;
+  if (typeof text !== "string" || !text.trim()) {
     return res.status(400).json({ message: "Missing parameters" });
   }
 
@@ -500,9 +539,10 @@ Language preference: ${lang}
 });
 
 // --------- Transaction History ----------
-app.get("/history/:username", async (req, res) => {
-  const { username } = req.params;
-  
+// "/history/:username" is kept for old clients but only works for your own username.
+app.get(["/history", "/history/:username"], requireAuth, requireSameUser, async (req, res) => {
+  const username = req.username;
+
   try {
     const result = await pool.query(
       "SELECT * FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 20",
@@ -515,10 +555,11 @@ app.get("/history/:username", async (req, res) => {
 });
 
 // --------- Bill Scanner ----------
-app.post("/scan-bill", (req, res) => {
-  const { username, imageData, billType } = req.body;
-  
-  if (!username || !imageData) {
+app.post("/scan-bill", requireAuth, (req, res) => {
+  const username = req.username;
+  const { imageData, billType } = req.body;
+
+  if (!imageData) {
     return res.status(400).json({ message: "Missing required fields" });
   }
 
@@ -553,55 +594,87 @@ app.post("/scan-bill", (req, res) => {
   });
 });
 
-app.post("/pay-bill", async (req, res) => {
-  const { username, billData } = req.body;
+// A positive whole-naira amount within limits, or null.
+const validAmount = (value, max) =>
+  Number.isInteger(value) && value > 0 && value <= max ? value : null;
 
-  if (!username || !billData) {
-    return res.status(400).json({ message: "Missing required fields" });
+// Deducts amount only if the balance covers it (atomic, safe under concurrency).
+// Returns the new balance, or null if funds are insufficient.
+const debit = async (db, username, amount) => {
+  const { rows } = await db.query(
+    "UPDATE users SET balance = balance - $1 WHERE username=$2 AND balance >= $1 RETURNING balance",
+    [amount, username]
+  );
+  return rows.length ? rows[0].balance : null;
+};
+
+const currentBalance = async (username) =>
+  (await pool.query("SELECT balance FROM users WHERE username=$1", [username])).rows[0]?.balance ?? 0;
+
+// NOTE: billData still comes from the client (the scanner is a mock). The amount is
+// validated here, but the proper fix is for the server to store scanned bills.
+app.post("/pay-bill", requireAuth, async (req, res) => {
+  const username = req.username;
+  const { billData } = req.body;
+
+  const amount = validAmount(billData?.amount, 1_000_000);
+  if (!billData || !amount) {
+    return res.status(400).json({ message: "Invalid bill details" });
   }
 
   try {
-    const result = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
-    
-    if (result.rows.length === 0) {
-      return res.status(400).json({ message: "User not found" });
-    }
-    
-    const user = result.rows[0];
-    const amount = billData.amount;
+    const result = await withTransaction(async (db) => {
+      const balance = await debit(db, username, amount);
+      if (balance === null) return { ok: false };
+      await db.query(
+        "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
+        [username, "Bill Payment", amount, `${billData.provider} - ${billData.accountNumber}`]
+      );
+      return { ok: true, balance };
+    });
 
-    if (user.balance < amount) {
+    if (!result.ok) {
+      const balance = await currentBalance(username);
       return res.status(400).json({
-        message: `You need ₦${amount.toLocaleString()} but only have ₦${user.balance.toLocaleString()}.`
+        message: `You need ${naira(amount)} but only have ${naira(balance)}.`
       });
     }
-
-    const newBalance = user.balance - amount;
-
-    await pool.query("UPDATE users SET balance=$1 WHERE username=$2", [newBalance, username]);
-    await pool.query(
-      "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
-      [username, "Bill Payment", amount, `${billData.provider} - ${billData.accountNumber}`]
-    );
+    const { balance } = result;
 
     res.json({
-      message: `Perfect! Your ${billData.provider} bill of ₦${amount.toLocaleString()} has been paid. New balance: ₦${newBalance.toLocaleString()}.`,
-      balance: newBalance,
+      message: `Perfect! Your ${billData.provider} bill of ${naira(amount)} has been paid. New balance: ${naira(balance)}.`,
+      balance,
       receiptNumber: "RCP" + Date.now()
     });
   } catch (err) {
+    console.error("Pay bill error:", err);
     res.status(500).json({ message: "Payment failed" });
   }
 });
 
 // --------- Esusu Endpoints ----------
-app.post("/esusu/create", async (req, res) => {
-  const { username, groupName, amountPerPerson, frequency, totalMembers } = req.body;
-  
-  if (!username || !groupName || !amountPerPerson || !frequency || !totalMembers) {
-    return res.status(400).json({ message: "All fields required" });
+const ESUSU_FREQUENCIES = ["daily", "weekly", "monthly"];
+
+app.post("/esusu/create", requireAuth, async (req, res) => {
+  const username = req.username;
+  const { frequency } = req.body;
+  const groupName = typeof req.body.groupName === "string" ? req.body.groupName.trim() : "";
+  const amountPerPerson = validAmount(req.body.amountPerPerson, 1_000_000);
+  const totalMembers = Number.isInteger(req.body.totalMembers) ? req.body.totalMembers : null;
+
+  if (!groupName || groupName.length > 50) {
+    return res.status(400).json({ message: "Group name must be 1-50 characters" });
   }
-  
+  if (!amountPerPerson) {
+    return res.status(400).json({ message: "Amount per person must be between ₦1 and ₦1,000,000" });
+  }
+  if (!ESUSU_FREQUENCIES.includes(frequency)) {
+    return res.status(400).json({ message: "Frequency must be daily, weekly or monthly" });
+  }
+  if (!totalMembers || totalMembers < 2 || totalMembers > 50) {
+    return res.status(400).json({ message: "A group needs between 2 and 50 members" });
+  }
+
   try {
     const result = await pool.query(
       "INSERT INTO esusu_groups (group_name, amount_per_person, frequency, total_members, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id",
@@ -620,12 +693,15 @@ app.post("/esusu/create", async (req, res) => {
       groupId: groupId
     });
   } catch (err) {
-    res.status(400).json({ message: "Group name already exists" });
+    if (err.code === "23505") return res.status(400).json({ message: "Group name already exists" });
+    console.error("Esusu create error:", err);
+    res.status(500).json({ message: "Could not create group" });
   }
 });
 
-app.post("/esusu/join", async (req, res) => {
-  const { username, groupName } = req.body;
+app.post("/esusu/join", requireAuth, async (req, res) => {
+  const username = req.username;
+  const { groupName } = req.body;
 
   try {
     const groupResult = await pool.query("SELECT * FROM esusu_groups WHERE group_name=$1", [groupName]);
@@ -666,19 +742,19 @@ app.post("/esusu/join", async (req, res) => {
   }
 });
 
-app.post("/esusu/contribute", async (req, res) => {
-  const { username, groupName } = req.body;
+app.post("/esusu/contribute", requireAuth, async (req, res) => {
+  const username = req.username;
+  const { groupName } = req.body;
 
   try {
-    const userResult = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
     const groupResult = await pool.query("SELECT * FROM esusu_groups WHERE group_name=$1", [groupName]);
-    
-    if (userResult.rows.length === 0 || groupResult.rows.length === 0) {
-      return res.status(400).json({ message: "User or group not found" });
+
+    if (groupResult.rows.length === 0) {
+      return res.status(400).json({ message: "Group not found" });
     }
-    
-    const user = userResult.rows[0];
+
     const group = groupResult.rows[0];
+    const amount = group.amount_per_person;
 
     const memberResult = await pool.query(
       "SELECT * FROM esusu_members WHERE group_id=$1 AND username=$2", 
@@ -689,38 +765,45 @@ app.post("/esusu/contribute", async (req, res) => {
       return res.status(400).json({ message: "You're not a member of this group!" });
     }
 
-    if (user.balance < group.amount_per_person) {
-      return res.status(400).json({ 
-        message: `You need ₦${group.amount_per_person.toLocaleString()} but only have ₦${user.balance.toLocaleString()}.`
-      });
+    // Groups created before amount validation existed could hold a bad amount.
+    if (!validAmount(amount, 1_000_000)) {
+      return res.status(400).json({ message: "This group has an invalid contribution amount." });
     }
 
-    const newBalance = user.balance - group.amount_per_person;
+    const result = await withTransaction(async (db) => {
+      const balance = await debit(db, username, amount);
+      if (balance === null) return { ok: false };
 
-    await pool.query("UPDATE users SET balance=$1 WHERE username=$2", [newBalance, username]);
-    
-    await pool.query(
-      "INSERT INTO esusu_contributions (group_id, username, amount, cycle_number) VALUES ($1, $2, $3, $4)",
-      [group.id, username, group.amount_per_person, 1]
-    );
+      // Cycle tracking is still a placeholder (always 1) until the Esusu cycle logic is built.
+      await db.query(
+        "INSERT INTO esusu_contributions (group_id, username, amount, cycle_number) VALUES ($1, $2, $3, $4)",
+        [group.id, username, amount, 1]
+      );
+      await db.query(
+        "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
+        [username, "Esusu Contribution", amount, groupName]
+      );
+      return { ok: true, balance };
+    });
 
-    await pool.query(
-      "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, $2, $3, $4)",
-      [username, "Esusu Contribution", group.amount_per_person, groupName]
-    );
+    if (!result.ok) {
+      const balance = await currentBalance(username);
+      return res.status(400).json({ message: `You need ${naira(amount)} but only have ${naira(balance)}.` });
+    }
 
-    res.json({ 
-      message: `Perfect! You've contributed ₦${group.amount_per_person.toLocaleString()} to "${groupName}".`,
-      balance: newBalance
+    res.json({
+      message: `Perfect! You've contributed ${naira(amount)} to "${groupName}".`,
+      balance: result.balance
     });
   } catch (err) {
+    console.error("Esusu contribute error:", err);
     res.status(500).json({ message: "Contribution failed" });
   }
 });
 
-app.get("/esusu/my-groups/:username", async (req, res) => {
-  const { username } = req.params;
-  
+app.get(["/esusu/my-groups", "/esusu/my-groups/:username"], requireAuth, requireSameUser, async (req, res) => {
+  const username = req.username;
+
   try {
     const result = await pool.query(
       `SELECT g.*, m.position, m.has_collected 

@@ -1,13 +1,12 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
-import axios from "axios";
-
-// ------------------------- Backend URL -------------------------
-const API_URL = "https://Iya-Bolanle-backend.onrender.com";
+import { api, loadSession, saveSession, clearSession, UNAUTHORIZED_EVENT } from "./api";
 
 export default function App() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  // True while a saved session is being checked on page load
+  const [isRestoring, setIsRestoring] = useState(() => Boolean(loadSession()));
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
@@ -51,7 +50,7 @@ export default function App() {
   const handleSignup = async () => {
     if (!username || !password) return alert("Please enter both username and password");
     try {
-      const res = await axios.post(`${API_URL}/signup`, { username, password });
+      const res = await api.post(`/signup`, { username, password });
       alert(res.data.message);
     } catch (err) {
       alert(err.response?.data?.message || "Signup failed");
@@ -61,9 +60,12 @@ export default function App() {
   const handleLogin = async () => {
     if (!username || !password) return alert("Please enter both username and password");
     try {
-      const res = await axios.post(`${API_URL}/login`, { username, password });
+      const res = await api.post(`/login`, { username, password });
+      saveSession({ token: res.data.token, username: res.data.username });
+      setUsername(res.data.username);
+      setPassword("");
       setIsLoggedIn(true);
-      const welcomeMsg = res.data.welcomeMessage || `Hi ${username}! I'm SARA, your financial assistant.`;
+      const welcomeMsg = res.data.welcomeMessage || `Hi ${res.data.username}! I'm SARA, your financial assistant.`;
       setMessages([{ role: "assistant", text: welcomeMsg }]);
       speakText(welcomeMsg);
     } catch (err) {
@@ -71,10 +73,52 @@ export default function App() {
     }
   };
 
+  const logout = useCallback(() => {
+    clearSession();
+    window.speechSynthesis?.cancel();
+    setIsLoggedIn(false);
+    setMessages([]);
+    setAwaitingConfirm(false);
+    setUsername("");
+    setPassword("");
+    setShowEsusu(false);
+    setShowBillScanner(false);
+    setEsusuGroups([]);
+    setScannedBill(null);
+  }, []);
+
+  // Restore a saved session on page load (the token is checked by the server).
+  useEffect(() => {
+    const session = loadSession();
+    if (!session) return;
+    api
+      .get("/me")
+      .then((res) => {
+        setUsername(res.data.username);
+        setIsLoggedIn(true);
+        setMessages([{
+          role: "assistant",
+          text: `Welcome back, ${res.data.username}! Your balance is ₦${res.data.balance.toLocaleString()}. How can I help?`,
+        }]);
+      })
+      .catch(() => clearSession())
+      .finally(() => setIsRestoring(false));
+  }, []);
+
+  // The API client fires this when the server rejects the token (expired/invalid).
+  useEffect(() => {
+    const onUnauthorized = (e) => {
+      logout();
+      alert(e.detail || "Your session has expired. Please log in again.");
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
+  }, [logout]);
+
   // ------------------------- Esusu Functions -------------------------
   const fetchEsusuGroups = async () => {
     try {
-      const res = await axios.get(`${API_URL}/esusu/my-groups/${username}`);
+      const res = await api.get(`/esusu/my-groups`);
       setEsusuGroups(res.data.groups || []);
     } catch (err) {
       console.error("Could not fetch esusu groups");
@@ -83,8 +127,7 @@ export default function App() {
 
   const createEsusuGroup = async (groupName, amount, frequency, members) => {
     try {
-      const res = await axios.post(`${API_URL}/esusu/create`, {
-        username,
+      const res = await api.post(`/esusu/create`, {
         groupName,
         amountPerPerson: parseInt(amount),
         frequency,
@@ -102,7 +145,7 @@ export default function App() {
 
   const joinEsusuGroup = async (groupName) => {
     try {
-      const res = await axios.post(`${API_URL}/esusu/join`, { username, groupName });
+      const res = await api.post(`/esusu/join`, { groupName });
       setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
       speakText(res.data.speak || res.data.message);
       fetchEsusuGroups();
@@ -115,7 +158,7 @@ export default function App() {
 
   const contributeToEsusu = async (groupName) => {
     try {
-      const res = await axios.post(`${API_URL}/esusu/contribute`, { username, groupName });
+      const res = await api.post(`/esusu/contribute`, { groupName });
       setMessages((prev) => [...prev, { role: "assistant", text: res.data.message }]);
       speakText(res.data.speak || res.data.message);
       fetchEsusuGroups();
@@ -157,8 +200,7 @@ export default function App() {
         else if (filename.includes('internet') || filename.includes('wifi')) billType = "internet";
         else if (filename.includes('cable') || filename.includes('dstv') || filename.includes('gotv')) billType = "cable";
 
-        const res = await axios.post(`${API_URL}/scan-bill`, {
-          username,
+        const res = await api.post(`/scan-bill`, {
           imageData: reader.result,
           billType: billType
         });
@@ -179,8 +221,7 @@ export default function App() {
     if (!scannedBill) return;
 
     try {
-      const res = await axios.post(`${API_URL}/pay-bill`, {
-        username,
+      const res = await api.post(`/pay-bill`, {
         billData: scannedBill
       });
 
@@ -199,7 +240,7 @@ export default function App() {
   const fetchHistory = async () => {
     setIsThinking(true);
     try {
-      const res = await axios.get(`${API_URL}/history/${username}`);
+      const res = await api.get(`/history`);
       
       if (!res.data.transactions || res.data.transactions.length === 0) {
         setMessages((prev) => [...prev, { 
@@ -261,7 +302,7 @@ export default function App() {
     setIsThinking(true);
 
     try {
-      const res = await axios.post(`${API_URL}/action`, { username, text });
+      const res = await api.post(`/action`, { text });
       const reply = res.data.message;
       setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
       setAwaitingConfirm(Boolean(res.data.awaitingConfirmation));
@@ -325,6 +366,14 @@ export default function App() {
   };
 
   // ------------------------- Render -------------------------
+  if (isRestoring) {
+    return (
+      <div style={styles.container}>
+        <p style={styles.subtitle}>Loading SARA…</p>
+      </div>
+    );
+  }
+
   if (!isLoggedIn) {
     return (
       <div style={styles.container}>
@@ -395,15 +444,7 @@ export default function App() {
               {showEsusu ? "💬 Chat" : "🤝 Esusu"}
             </button>
             <button 
-              onClick={() => {
-                setIsLoggedIn(false);
-                setMessages([]);
-                setAwaitingConfirm(false);
-                setUsername("");
-                setPassword("");
-                setShowEsusu(false);
-                setShowBillScanner(false);
-              }} 
+              onClick={logout}
               style={styles.logoutButton}
             >
               Logout
