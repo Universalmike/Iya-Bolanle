@@ -1,5 +1,6 @@
-// Language options and the few chat messages the browser itself shows.
-// Everything else SARA says comes translated from the server.
+// Language options, the few chat messages the browser itself shows, and (in
+// screenText.js) the text on buttons and screens. Replies come translated from the server.
+import { screenText } from "./screenText";
 
 export const LANGUAGE_OPTIONS = [
   { value: "auto", label: "🌐 Auto" },
@@ -121,8 +122,12 @@ const strings = {
   },
 };
 
+const allStrings = { ...strings, ...screenText };
+
 // ui("switchTo", "yoruba", "Hausa") — falls back to English.
 export const ui = (key, language, ...args) => {
-  const value = strings[key]?.[language] ?? strings[key]?.english ?? key;
+  const entry = allStrings[key];
+  if (!entry && import.meta.env?.DEV) console.warn(`Missing UI text: ${key}`);
+  const value = entry?.[language] ?? entry?.english ?? key;
   return typeof value === "function" ? value(...args) : value;
 };

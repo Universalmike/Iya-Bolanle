@@ -96,7 +96,10 @@ test("geminiParseIntent validates the model output", async () => {
     apiKey: "k", model: "m",
     fetchImpl: fakeGemini({ intent: "transfer", amount: 2000, recipient: "Tunde", phone: null, language: "pidgin" }),
   });
-  assert.deepEqual(parsed, { intent: "transfer", amount: 2000, recipient: "Tunde", phone: null, language: "pidgin", source: "gemini" });
+  assert.deepEqual(parsed, {
+    intent: "transfer", amount: 2000, recipient: "Tunde", phone: null,
+    network: null, note: null, history: null, language: "pidgin", source: "gemini",
+  });
 });
 
 test("geminiParseIntent drops a recipient that isn't in the message", async () => {

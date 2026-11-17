@@ -13,18 +13,60 @@ const messages = {
   },
 
   confirmTransfer: {
-    english: (amt, to) => `Send ${naira(amt)} to ${to}? Reply YES to confirm or NO to cancel.`,
-    pidgin: (amt, to) => `You wan send ${naira(amt)} give ${to}? Talk YES make I send am, or NO to cancel.`,
-    yoruba: (amt, to) => `Se ki n fi ${naira(amt)} ranse si ${to}? So BEENI lati jerisi tabi RARA lati fagile.`,
-    igbo: (amt, to) => `Ka m ziga ${naira(amt)} nye ${to}? Zaa EE ka i kwado ya, ma o bu MBA ka i kagbuo ya.`,
-    hausa: (amt, to) => `In tura ${naira(amt)} zuwa ga ${to}? Ka ce EH don tabbatarwa, ko A'A don sokewa.`,
+    english: (amt, to, note) => `Send ${naira(amt)} to ${to}${note ? ` for "${note}"` : ""}? Reply YES to confirm or NO to cancel.`,
+    pidgin: (amt, to, note) => `You wan send ${naira(amt)} give ${to}${note ? ` for "${note}"` : ""}? Talk YES make I send am, or NO to cancel.`,
+    yoruba: (amt, to, note) => `Se ki n fi ${naira(amt)} ranse si ${to}${note ? ` fun "${note}"` : ""}? So BEENI lati jerisi tabi RARA lati fagile.`,
+    igbo: (amt, to, note) => `Ka m ziga ${naira(amt)} nye ${to}${note ? ` maka "${note}"` : ""}? Zaa EE ka i kwado ya, ma o bu MBA ka i kagbuo ya.`,
+    hausa: (amt, to, note) => `In tura ${naira(amt)} zuwa ga ${to}${note ? ` don "${note}"` : ""}? Ka ce EH don tabbatarwa, ko A'A don sokewa.`,
   },
   confirmAirtime: {
-    english: (amt, phone) => `Buy ${naira(amt)} airtime for ${phone ?? "your number"}? Reply YES to confirm or NO to cancel.`,
-    pidgin: (amt, phone) => `You wan buy ${naira(amt)} airtime for ${phone ?? "your number"}? Talk YES or NO.`,
-    yoruba: (amt, phone) => `Se ki n ra airtime ${naira(amt)} fun ${phone ?? "nomba re"}? So BEENI tabi RARA.`,
-    igbo: (amt, phone) => `Ka m zuta airtime ${naira(amt)} maka ${phone ?? "nomba gi"}? Zaa EE ma o bu MBA.`,
-    hausa: (amt, phone) => `In sayi airtime na ${naira(amt)} don ${phone ?? "lambar ka"}? Ka ce EH ko A'A.`,
+    english: (amt, phone, net) => `Buy ${naira(amt)} ${net} airtime for ${phone}? Reply YES to confirm or NO to cancel.`,
+    pidgin: (amt, phone, net) => `You wan buy ${naira(amt)} ${net} airtime for ${phone}? Talk YES or NO.`,
+    yoruba: (amt, phone, net) => `Se ki n ra airtime ${net} ${naira(amt)} fun ${phone}? So BEENI tabi RARA.`,
+    igbo: (amt, phone, net) => `Ka m zuta airtime ${net} ${naira(amt)} maka ${phone}? Zaa EE ma o bu MBA.`,
+    hausa: (amt, phone, net) => `In sayi airtime na ${net} na ${naira(amt)} don ${phone}? Ka ce EH ko A'A.`,
+  },
+  askAirtimePhone: {
+    english: (amt) => `Which number should I buy ${naira(amt)} airtime for? Send the number, e.g. 08031234567.`,
+    pidgin: (amt) => `Which number I go buy the ${naira(amt)} airtime for? Send the number, like 08031234567.`,
+    yoruba: (amt) => `Nomba wo ni ki n ra airtime ${naira(amt)} fun? Fi nomba naa ranse, bii 08031234567.`,
+    igbo: (amt) => `Kedu nomba m ga-azutara airtime ${naira(amt)}? Ziga nomba ahu, dika 08031234567.`,
+    hausa: (amt) => `Wace lamba zan saya wa airtime na ${naira(amt)}? Aiko lambar, kamar 08031234567.`,
+  },
+  askAirtimeNetwork: {
+    english: (phone) => `Which network is ${phone} on: MTN, Glo, Airtel or 9mobile?`,
+    pidgin: (phone) => `Which network ${phone} dey use: MTN, Glo, Airtel or 9mobile?`,
+    yoruba: (phone) => `Netiwoki wo ni ${phone} wa: MTN, Glo, Airtel tabi 9mobile?`,
+    igbo: (phone) => `Kedu netwok ${phone} no na ya: MTN, Glo, Airtel ma o bu 9mobile?`,
+    hausa: (phone) => `Wane layi ne ${phone}: MTN, Glo, Airtel ko 9mobile?`,
+  },
+  didYouMean: {
+    english: (to, suggestion) => `I couldn't find '${to}'. Did you mean ${suggestion}? Say "send ... to ${suggestion}".`,
+    pidgin: (to, suggestion) => `I no see '${to}'. Na ${suggestion} you mean? Talk "send ... to ${suggestion}".`,
+    yoruba: (to, suggestion) => `Mi o ri '${to}'. Se ${suggestion} lo n so? So "send ... to ${suggestion}".`,
+    igbo: (to, suggestion) => `Ahughi m '${to}'. O bu ${suggestion} ka i na-ekwu? Kwuo "send ... to ${suggestion}".`,
+    hausa: (to, suggestion) => `Ban sami '${to}' ba. Ko ${suggestion} kake nufi? Ka ce "send ... to ${suggestion}".`,
+  },
+  receivedWhileAway: {
+    english: (list) => `💰 New money in: ${list}.`,
+    pidgin: (list) => `💰 Money don enter: ${list}.`,
+    yoruba: (list) => `💰 Owo tuntun wole: ${list}.`,
+    igbo: (list) => `💰 Ego ohuru batara: ${list}.`,
+    hausa: (list) => `💰 Sabon kudi ya shigo: ${list}.`,
+  },
+  receivedItem: {
+    english: (from, amt, note) => `${from} sent you ${naira(amt)}${note ? ` ("${note}")` : ""}`,
+    pidgin: (from, amt, note) => `${from} send you ${naira(amt)}${note ? ` ("${note}")` : ""}`,
+    yoruba: (from, amt, note) => `${from} fi ${naira(amt)} ranse si e${note ? ` ("${note}")` : ""}`,
+    igbo: (from, amt, note) => `${from} zitere gi ${naira(amt)}${note ? ` ("${note}")` : ""}`,
+    hausa: (from, amt, note) => `${from} ya tura maka ${naira(amt)}${note ? ` ("${note}")` : ""}`,
+  },
+  receivedMore: {
+    english: (n) => `and ${n} more`,
+    pidgin: (n) => `and ${n} more`,
+    yoruba: (n) => `ati ${n} miiran`,
+    igbo: (n) => `na ${n} ozo`,
+    hausa: (n) => `da wasu ${n}`,
   },
 
   transferSuccess: {
@@ -35,11 +77,11 @@ const messages = {
     hausa: (amt, to, bal) => `An gama! An tura ${naira(amt)} zuwa ga ${to}. Sabon kudin ka shine ${naira(bal)}.`,
   },
   airtimeSuccess: {
-    english: (amt, bal) => `Done! I've topped up ${naira(amt)} airtime for you. Your new balance is ${naira(bal)}.`,
-    pidgin: (amt, bal) => `Ehen! I don buy ${naira(amt)} airtime for you o. Your new balance na ${naira(bal)}.`,
-    yoruba: (amt, bal) => `O dara! Mo ti ra airtime ${naira(amt)} fun e. Owo to ku fun e ni ${naira(bal)}.`,
-    igbo: (amt, bal) => `O di mma! Azutala m airtime ${naira(amt)} maka gi. Ego gi foduru ugbu a bu ${naira(bal)}.`,
-    hausa: (amt, bal) => `An gama! Na saya maka airtime na ${naira(amt)}. Sabon kudin ka shine ${naira(bal)}.`,
+    english: (amt, bal, phone, net) => `Done! I've topped up ${naira(amt)} ${net} airtime on ${phone}. Your new balance is ${naira(bal)}.`,
+    pidgin: (amt, bal, phone, net) => `Ehen! I don buy ${naira(amt)} ${net} airtime for ${phone} o. Your new balance na ${naira(bal)}.`,
+    yoruba: (amt, bal, phone, net) => `O dara! Mo ti ra airtime ${net} ${naira(amt)} fun ${phone}. Owo to ku fun e ni ${naira(bal)}.`,
+    igbo: (amt, bal, phone, net) => `O di mma! Azutala m airtime ${net} ${naira(amt)} maka ${phone}. Ego gi foduru ugbu a bu ${naira(bal)}.`,
+    hausa: (amt, bal, phone, net) => `An gama! Na sayi airtime na ${net} na ${naira(amt)} don ${phone}. Sabon kudin ka shine ${naira(bal)}.`,
   },
 
   insufficientFunds: {
@@ -150,6 +192,34 @@ const messages = {
     yoruba: () => `📊 Eyi ni awon idunadura re to sese:`,
     igbo: () => `📊 Lee azumahia gi ndi na-adi nso:`,
     hausa: () => `📊 Ga tarihin cinikin ka na kwanan nan:`,
+  },
+  historyFilteredHeader: {
+    english: (label) => `📊 Your transactions: ${label}`,
+    pidgin: (label) => `📊 Your transactions: ${label}`,
+    yoruba: (label) => `📊 Awon idunadura re: ${label}`,
+    igbo: (label) => `📊 Azumahia gi: ${label}`,
+    hausa: (label) => `📊 Cinikin ka: ${label}`,
+  },
+  historyNoMatch: {
+    english: () => `I didn't find any transactions that match.`,
+    pidgin: () => `I no see any transaction wey match.`,
+    yoruba: () => `Mi o ri idunadura kankan to ba eyi mu.`,
+    igbo: () => `Ahughi m azumahia o bula dabara.`,
+    hausa: () => `Ban sami wani ciniki da ya dace ba.`,
+  },
+  historyMore: {
+    english: (shown, total) => `…showing the latest ${shown} of ${total}.`,
+    pidgin: (shown, total) => `…na the latest ${shown} out of ${total} I show you.`,
+    yoruba: (shown, total) => `…awon ${shown} to kehin ninu ${total} ni mo fi han.`,
+    igbo: (shown, total) => `…nke ikpeazu ${shown} n'ime ${total} ka m gosiri.`,
+    hausa: (shown, total) => `…na nuna na baya-bayan nan ${shown} cikin ${total}.`,
+  },
+  historyTotals: {
+    english: (inAmt, outAmt) => `Money in: ${naira(inAmt)} · Money out: ${naira(outAmt)}`,
+    pidgin: (inAmt, outAmt) => `Money wey enter: ${naira(inAmt)} · Money wey comot: ${naira(outAmt)}`,
+    yoruba: (inAmt, outAmt) => `Owo to wole: ${naira(inAmt)} · Owo to jade: ${naira(outAmt)}`,
+    igbo: (inAmt, outAmt) => `Ego batara: ${naira(inAmt)} · Ego puru: ${naira(outAmt)}`,
+    hausa: (inAmt, outAmt) => `Kudin da ya shigo: ${naira(inAmt)} · Kudin da ya fita: ${naira(outAmt)}`,
   },
   historyFailed: {
     english: () => `I couldn't fetch your transaction history. Please try again.`,
@@ -764,7 +834,40 @@ const BILL_TYPES = {
 };
 export const billTypeName = (type, language) => BILL_TYPES[type]?.[language] ?? BILL_TYPES[type]?.english ?? type;
 
-export const LANGUAGE_NAMES = { english: "English", pidgin: "Pidgin", yoruba: "Yorùbá", igbo: "Igbo", hausa: "Hausa" };
+const HISTORY_TYPE_LABELS = {
+  sent: { english: "money you sent", pidgin: "money wey you send", yoruba: "owo ti o fi ranse", igbo: "ego i zigara", hausa: "kudin da ka tura" },
+  received: { english: "money you received", pidgin: "money wey you collect", yoruba: "owo ti o gba", igbo: "ego i natara", hausa: "kudin da ka karba" },
+  airtime: { english: "airtime", pidgin: "airtime", yoruba: "airtime", igbo: "airtime", hausa: "airtime" },
+  bills: { english: "bills", pidgin: "bills", yoruba: "iwe owo", igbo: "akwukwo ugwo", hausa: "takardun biya" },
+  esusu: { english: "esusu", pidgin: "esusu", yoruba: "ajo", igbo: "isusu", hausa: "adashe" },
+  money_out: { english: "spending", pidgin: "wetin you spend", yoruba: "inawo", igbo: "mmefu ego", hausa: "kashe kudi" },
+};
+const HISTORY_PERIOD_LABELS = {
+  today: { english: "today", pidgin: "today", yoruba: "loni", igbo: "taa", hausa: "yau" },
+  yesterday: { english: "yesterday", pidgin: "yesterday", yoruba: "lana", igbo: "unyahu", hausa: "jiya" },
+  this_week: { english: "this week", pidgin: "this week", yoruba: "ose yii", igbo: "izu a", hausa: "wannan mako" },
+  last_week: { english: "last week", pidgin: "last week", yoruba: "ose to koja", igbo: "izu gara aga", hausa: "makon jiya" },
+  this_month: { english: "this month", pidgin: "this month", yoruba: "osu yii", igbo: "onwa a", hausa: "wannan wata" },
+  last_month: { english: "last month", pidgin: "last month", yoruba: "osu to koja", igbo: "onwa gara aga", hausa: "watan jiya" },
+};
+const LAST_DAYS_LABEL = {
+  english: (n) => `last ${n} days`, pidgin: (n) => `last ${n} days`, yoruba: (n) => `ojo ${n} to koja`,
+  igbo: (n) => `ubochi ${n} gara aga`, hausa: (n) => `kwanaki ${n} da suka wuce`,
+};
+const WITH_LABEL = { english: "with", pidgin: "with", yoruba: "pelu", igbo: "na", hausa: "da" };
+
+// e.g. "airtime · this month" or "money you received · with bola"
+export const historyLabel = (f, language) => {
+  const pick = (map) => map?.[language] ?? map?.english;
+  const parts = [];
+  if (f.type !== "all") parts.push(pick(HISTORY_TYPE_LABELS[f.type]));
+  if (f.period === "last_days") parts.push(pick(LAST_DAYS_LABEL)(f.days));
+  else if (f.period !== "all") parts.push(pick(HISTORY_PERIOD_LABELS[f.period]));
+  if (f.counterparty) parts.push(`${pick(WITH_LABEL)} ${f.counterparty}`);
+  return parts.join(" · ");
+};
+
+export const LANGUAGE_NAMES ={ english: "English", pidgin: "Pidgin", yoruba: "Yorùbá", igbo: "Igbo", hausa: "Hausa" };
 
 // t("balance", "yoruba", name, bal) — falls back to English for unknown languages.
 export const t = (key, language, ...args) => {

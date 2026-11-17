@@ -33,6 +33,10 @@ const shrinkImage = (file, maxSide = 1600, quality = 0.85) =>
     img.src = url;
   });
 
+// The first chat bubbles after login: the welcome, plus any "bola sent you ₦500" notice.
+const welcomeMessages = (data) =>
+  [data.welcomeMessage, data.notice].filter(Boolean).map((text) => ({ role: "assistant", text }));
+
 // Picks a browser voice for the language. Most browsers have no Yoruba, Igbo or
 // Hausa voice; then the (accent-stripped) text is read by a Nigerian/English voice.
 const pickVoice = (code) => {
@@ -59,9 +63,15 @@ export default function App() {
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
   // The language SARA is currently replying in, the saved preference
   // ("auto" or a language), and an offer to switch when the user writes in another one.
-  const [language, setLanguage] = useState("english");
+  // The language SARA replies in and the screen is shown in. Before login it follows
+  // the choice on the login screen ("auto" shows English until the account is known).
+  const [language, setLanguage] = useState(() => {
+    const choice = loadLanguageChoice();
+    return choice !== "auto" ? choice : "english";
+  });
   const [languagePref, setLanguagePref] = useState(() => loadLanguageChoice());
   const [languageSuggestion, setLanguageSuggestion] = useState(null);
+  const [balance, setBalance] = useState(null);
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const chatEndRef = useRef(null);
@@ -120,8 +130,11 @@ export default function App() {
   };
 
   // Shows and speaks a server reply (success or error) and syncs the language.
+  // A "notice" (e.g. "bola sent you ₦500") is shown as its own bubble before the reply.
   const showReply = (data, fallbackText) => {
     const text = data?.message || fallbackText;
+    if (data?.notice) addAssistantMessage(data.notice);
+    if (typeof data?.balance === "number") setBalance(data.balance);
     addAssistantMessage(text);
     applyLanguage(data);
     speakText(data?.speak || text, data?.language || language);
@@ -135,6 +148,7 @@ export default function App() {
     if (!isLoggedIn) {
       setLanguagePref(value);
       saveLanguageChoice(value);
+      if (value !== "auto") setLanguage(value);
       return;
     }
     try {
@@ -163,9 +177,10 @@ export default function App() {
       setUsername(res.data.username);
       setPassword("");
       setIsLoggedIn(true);
+      setBalance(res.data.balance);
       applyLanguage(res.data);
-      setMessages([{ role: "assistant", text: res.data.welcomeMessage }]);
-      speakText(res.data.welcomeMessage, res.data.language);
+      setMessages(welcomeMessages(res.data));
+      speakText([res.data.welcomeMessage, res.data.notice].filter(Boolean).join(" "), res.data.language);
     } catch (err) {
       alert(err.response?.data?.message || ui("genericError", language));
     }
@@ -175,6 +190,7 @@ export default function App() {
     clearSession();
     window.speechSynthesis?.cancel();
     setIsLoggedIn(false);
+    setBalance(null);
     setMessages([]);
     setAwaitingConfirm(false);
     setLanguageSuggestion(null);
@@ -197,8 +213,9 @@ export default function App() {
       .then((res) => {
         setUsername(res.data.username);
         setIsLoggedIn(true);
+        setBalance(res.data.balance);
         applyLanguage(res.data);
-        setMessages([{ role: "assistant", text: res.data.welcomeMessage }]);
+        setMessages(welcomeMessages(res.data));
       })
       .catch(() => clearSession())
       .finally(() => setIsRestoring(false));
@@ -217,6 +234,27 @@ export default function App() {
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, [logout]);
 
+  // ------------------------- Balance -------------------------
+  // Replies carry the balance after each action; this also catches money that
+  // arrived from someone else while the tab was in the background.
+  const refreshBalance = async () => {
+    try {
+      const res = await api.get("/balance");
+      setBalance(res.data.balance);
+    } catch {
+      // keep showing the last known balance
+    }
+  };
+
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    const onFocus = () => {
+      if (document.visibilityState === "visible") refreshBalance();
+    };
+    document.addEventListener("visibilitychange", onFocus);
+    return () => document.removeEventListener("visibilitychange", onFocus);
+  }, [isLoggedIn]);
+
   // ------------------------- Esusu Functions -------------------------
   const fetchEsusuGroups = async () => {
     try {
@@ -234,7 +272,7 @@ export default function App() {
     try {
       const res = await api.post(`/esusu/${path}`, body);
       showReply(res.data);
-      await fetchEsusuGroups();
+      await Promise.all([fetchEsusuGroups(), refreshBalance()]);
       return { ok: true, message: res.data.message };
     } catch (err) {
       const message = err.response?.data?.message || ui("genericError", language);
@@ -394,7 +432,7 @@ export default function App() {
       value={languagePref}
       onChange={(e) => changeLanguage(e.target.value)}
       style={styles.languageSelect}
-      aria-label="Language"
+      aria-label={ui("languageAria", language)}
     >
       {LANGUAGE_OPTIONS.map((o) => (
         <option key={o.value} value={o.value}>{o.label}</option>
@@ -406,7 +444,7 @@ export default function App() {
   if (isRestoring) {
     return (
       <div style={styles.container}>
-        <p style={styles.subtitle}>Loading SARA…</p>
+        <p style={styles.subtitle}>{ui("loading", language)}</p>
       </div>
     );
   }
@@ -418,12 +456,12 @@ export default function App() {
           <div style={styles.header}>
             <div>
               <h1 style={styles.title}>💸 SARA</h1>
-              <p style={styles.subtitle}>Your Personal Financial Assistant</p>
+              <p style={styles.subtitle}>{ui("tagline", language)}</p>
             </div>
             {languagePicker}
           </div>
           <input
-            placeholder="Username"
+            placeholder={ui("usernamePlaceholder", language)}
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             style={styles.input}
@@ -431,7 +469,7 @@ export default function App() {
           />
           <input
             type="password"
-            placeholder="Password"
+            placeholder={ui("passwordPlaceholder", language)}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             style={styles.input}
@@ -439,14 +477,14 @@ export default function App() {
           />
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={handleLogin} style={styles.buttonPrimary}>
-              Login
+              {ui("login", language)}
             </button>
             <button onClick={handleSignup} style={styles.buttonSecondary}>
-              Sign Up
+              {ui("signup", language)}
             </button>
           </div>
           <p style={styles.infoText}>
-            🔒 Your account is securely stored. New here? Sign up to get started with ₦10,000!
+            {ui("loginInfo", language)}
           </p>
         </div>
       </div>
@@ -457,7 +495,14 @@ export default function App() {
     <div style={styles.container}>
       <div style={styles.card}>
         <div style={styles.header}>
-          <h2 style={styles.title}>💸 SARA — Chat with your assistant</h2>
+          <div>
+            <h2 style={styles.title}>{ui("chatTitle", language)}</h2>
+            {balance !== null && (
+              <button onClick={refreshBalance} style={styles.balancePill} title={ui("refreshBalance", language)}>
+                💰 ₦{Number(balance).toLocaleString("en-NG")}
+              </button>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {languagePicker}
             <button
@@ -471,7 +516,7 @@ export default function App() {
                 background: showBillScanner ? "#7c3aed" : "rgba(124,58,237,0.1)"
               }}
             >
-              {showBillScanner ? "💬 Chat" : "📄 Scan Bill"}
+              {ui(showBillScanner ? "navChat" : "navBills", language)}
             </button>
             <button 
               onClick={() => {
@@ -483,13 +528,13 @@ export default function App() {
                 background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
               }}
             >
-              {showEsusu ? "💬 Chat" : "🤝 Esusu"}
+              {ui(showEsusu ? "navChat" : "navEsusu", language)}
             </button>
             <button 
               onClick={logout}
               style={styles.logoutButton}
             >
-              Logout
+              {ui("logout", language)}
             </button>
           </div>
         </div>
@@ -505,9 +550,10 @@ export default function App() {
             amount={billAmount}
             onAmountChange={setBillAmount}
             isPaying={isPayingBill}
+            lang={language}
           />
         ) : showEsusu ? (
-          <EsusuView groups={esusuGroups} onAction={esusuAction} styles={styles} />
+          <EsusuView groups={esusuGroups} onAction={esusuAction} styles={styles} lang={language} />
         ) : (
           <>
             <div style={styles.chatWindow}>
@@ -562,7 +608,7 @@ export default function App() {
                 <button
                   onClick={() => setLanguageSuggestion(null)}
                   style={styles.backButton}
-                  aria-label="Dismiss"
+                  aria-label={ui("dismiss", language)}
                 >
                   ✕
                 </button>
@@ -575,21 +621,21 @@ export default function App() {
                 style={styles.quickButton}
                 disabled={isThinking}
               >
-                💰 Balance
+                {ui("quickBalance", language)}
               </button>
               <button 
                 onClick={() => handleSend("buy 100 airtime", { quick: true })}
                 style={styles.quickButton}
                 disabled={isThinking}
               >
-                📱 Airtime
+                {ui("quickAirtime", language)}
               </button>
               <button 
                 onClick={fetchHistory} 
                 style={styles.quickButton}
                 disabled={isThinking}
               >
-                📊 History
+                {ui("quickHistory", language)}
               </button>
             </div>
 
@@ -597,7 +643,7 @@ export default function App() {
               <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Type a message or tap the mic..."
+                placeholder={ui("inputPlaceholder", language)}
                 style={styles.chatInput}
                 onKeyDown={(e) => e.key === "Enter" && !isThinking && handleSend()}
                 disabled={isThinking}
@@ -607,7 +653,7 @@ export default function App() {
                 style={styles.sendButton}
                 disabled={isThinking || !input.trim()}
               >
-                Send
+                {ui("send", language)}
               </button>
               <button 
                 onClick={isListening ? stopListening : () => startListening()} 
@@ -616,6 +662,7 @@ export default function App() {
                   background: isListening ? "#ef4444" : "#7c3aed"
                 }}
                 disabled={isThinking}
+                aria-label={ui("voiceInput", language)}
               >
                 {isListening ? "⏹️" : "🎤"}
               </button>
@@ -634,23 +681,24 @@ const formatBillDate = (iso) =>
   new Date(`${iso}T00:00:00`).toLocaleDateString('en-NG', { year: 'numeric', month: 'long', day: 'numeric' });
 
 function BillScannerView({
-  onImageUpload, scannedBill, isScanning, onPayBill, fileInputRef, notice, amount, onAmountChange, isPaying,
+  onImageUpload, scannedBill, isScanning, onPayBill, fileInputRef, notice, amount, onAmountChange, isPaying, lang,
 }) {
+  const tr = (key, ...args) => ui(key, lang, ...args);
   const amountValue = Number(String(amount).replace(/[₦,\s]/g, ""));
   const canPay = Number.isFinite(amountValue) && amountValue > 0 && !isPaying;
   const rows = scannedBill && [
-    ["Account Number", scannedBill.accountNumber],
-    ["Meter Number", scannedBill.meterNumber],
-    ["Customer Name", scannedBill.customerName],
-    ["Bill Period", scannedBill.billPeriod],
-    ["Package", scannedBill.package],
-    ["Due Date", scannedBill.dueDate && formatBillDate(scannedBill.dueDate) + (scannedBill.overdue ? " ⚠️" : "")],
+    [tr("accountNumber"), scannedBill.accountNumber],
+    [tr("meterNumber"), scannedBill.meterNumber],
+    [tr("customerName"), scannedBill.customerName],
+    [tr("billPeriod"), scannedBill.billPeriod],
+    [tr("package"), scannedBill.package],
+    [tr("dueDate"), scannedBill.dueDate && formatBillDate(scannedBill.dueDate) + (scannedBill.overdue ? " ⚠️" : "")],
   ].filter(([, value]) => value);
 
   return (
     <div style={styles.esusuContainer}>
-      <h3 style={styles.esusuTitle}>📄 Scan Your Bill</h3>
-      <p style={styles.esusuSubtitle}>Take a photo or upload an image of your utility bill</p>
+      <h3 style={styles.esusuTitle}>{tr("billTitle")}</h3>
+      <p style={styles.esusuSubtitle}>{tr("billSubtitle")}</p>
 
       <input
         ref={fileInputRef}
@@ -671,17 +719,17 @@ function BillScannerView({
         <>
           <div style={styles.uploadArea} onClick={() => fileInputRef.current?.click()}>
             <div style={styles.uploadIcon}>📸</div>
-            <h4 style={{ margin: "16px 0 8px 0", fontSize: 18 }}>Upload Bill Image</h4>
+            <h4 style={{ margin: "16px 0 8px 0", fontSize: 18 }}>{tr("uploadTitle")}</h4>
             <p style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>
-              Tap to take a photo or choose one from your device
+              {tr("uploadHint")}
             </p>
             <p style={{ margin: "8px 0 0 0", fontSize: 12, color: "#64748b" }}>
-              Supports: Electricity, Water, Internet, Cable TV bills
+              {tr("uploadSupports")}
             </p>
           </div>
 
           <div style={styles.billTypeGrid}>
-            {[["⚡", "Electricity"], ["💧", "Water"], ["📡", "Internet"], ["📺", "Cable TV"]].map(([icon, label]) => (
+            {[["⚡", tr("billTypeElectricity")], ["💧", tr("billTypeWater")], ["📡", tr("billTypeInternet")], ["📺", tr("billTypeCable")]].map(([icon, label]) => (
               <div key={label} style={styles.billTypeCard}>
                 <div style={{ fontSize: 32, marginBottom: 8 }}>{icon}</div>
                 <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{label}</p>
@@ -690,12 +738,12 @@ function BillScannerView({
           </div>
 
           <div style={styles.infoBox}>
-            <h4 style={{ margin: "0 0 8px 0", fontSize: 14 }}>How It Works 💡</h4>
+            <h4 style={{ margin: "0 0 8px 0", fontSize: 14 }}>{tr("howItWorks")}</h4>
             <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "#94a3b8" }}>
-              1. Take a clear photo of the whole bill, in good light<br/>
-              2. SARA reads the provider, account number and amount<br/>
-              3. Check the details and change the amount if you need to<br/>
-              4. Tap Pay 🎉
+              1. {tr("billStep1")}<br/>
+              2. {tr("billStep2")}<br/>
+              3. {tr("billStep3")}<br/>
+              4. {tr("billStep4")}
             </p>
           </div>
         </>
@@ -706,9 +754,9 @@ function BillScannerView({
           <div style={styles.scanningAnimation}>
             <div style={styles.spinner}></div>
           </div>
-          <h4 style={{ margin: "20px 0 8px 0", fontSize: 18 }}>Scanning Bill...</h4>
+          <h4 style={{ margin: "20px 0 8px 0", fontSize: 18 }}>{tr("scanningTitle")}</h4>
           <p style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>
-            SARA is reading your bill details
+            {tr("scanningHint")}
           </p>
         </div>
       )}
@@ -734,14 +782,14 @@ function BillScannerView({
           </div>
 
           <label style={{ display: "block", margin: "20px 0 6px", fontSize: 14, color: "#94a3b8" }}>
-            Amount to pay (₦)
+            {tr("amountToPay")}
           </label>
           <input
             type="text"
             inputMode="numeric"
             value={amount}
             onChange={(e) => onAmountChange(e.target.value)}
-            placeholder="e.g. 5000"
+            placeholder={tr("amountPlaceholder")}
             style={styles.input}
           />
 
@@ -751,19 +799,19 @@ function BillScannerView({
               disabled={!canPay}
               style={{ ...styles.payButton, opacity: canPay ? 1 : 0.5, cursor: canPay ? "pointer" : "not-allowed" }}
             >
-              {isPaying ? "Paying..." : canPay ? `Pay ₦${amountValue.toLocaleString()} Now` : "Enter an amount"}
+              {isPaying ? tr("paying") : canPay ? tr("payNow", `₦${amountValue.toLocaleString()}`) : tr("enterAmount")}
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
               style={styles.buttonSecondary}
             >
-              Scan Another
+              {tr("scanAnother")}
             </button>
           </div>
 
           <div style={styles.securityNote}>
             <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>
-              🔒 Check the account number before you pay. SARA pays the provider shown above.
+              {tr("billSecurity")}
             </p>
           </div>
         </div>
@@ -802,6 +850,17 @@ const styles = {
     margin: 0,
     fontSize: 24,
     fontWeight: 700,
+  },
+  balancePill: {
+    marginTop: 8,
+    padding: "4px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(34,197,94,0.4)",
+    background: "rgba(34,197,94,0.1)",
+    color: "#4ade80",
+    fontSize: 15,
+    fontWeight: 700,
+    cursor: "pointer",
   },
   subtitle: {
     margin: "8px 0 0 0",

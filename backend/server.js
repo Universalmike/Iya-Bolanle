@@ -2,10 +2,14 @@ import express from "express";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import pkg from 'pg';
-import { parseIntent, parseConfirmation, parseLanguageCommand, removeAccents, normalize, LANGUAGES } from "./nlu.js";
+import {
+  parseIntent, parseConfirmation, parseLanguageCommand, removeAccents, normalize, LANGUAGES,
+  extractPhone, extractNetwork, networkForPhone, closestMatch,
+} from "./nlu.js";
+import { queryHistory, formatHistory, historySpeech } from "./history.js";
 import { createBillsRouter, createBillTables } from "./bills.js";
 import { createEsusuRouter, migrateEsusu, formatDate, contribute, contributionMessage, statusMessage, listGroups, pickGroup } from "./esusu.js";
-import { t, naira, billTypeName, LANGUAGE_NAMES } from "./messages.js";
+import { t, naira, billTypeName, historyLabel, LANGUAGE_NAMES } from "./messages.js";
 import { signToken, requireAuth, requireSameUser, validateSignup, createRateLimiter } from "./auth.js";
 const { Pool } = pkg;
 
@@ -120,6 +124,15 @@ const createTables = async () => {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS language TEXT`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_language TEXT`);
 
+    // The number (and network) airtime was last bought for, offered as the default next time.
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS airtime_phone TEXT`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS airtime_network TEXT`);
+    // When the user was last told about money they received.
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP`);
+    // What a transfer was for ("lunch"), shown to both sides.
+    await pool.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS note TEXT`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS transactions_user_date ON transactions (username, date DESC)`);
+
     console.log('All tables created successfully');
   } catch (err) {
     console.error('Error creating tables:', err);
@@ -220,7 +233,7 @@ const withTransaction = async (fn) => {
   }
 };
 
-const executeTransfer = (username, { amount, recipient }, lang) =>
+const executeTransfer = (username, { amount, recipient, note = null }, lang) =>
   withTransaction(async (db) => {
     if (recipient === username) return { ok: false, message: t("selfTransfer", lang) };
 
@@ -240,8 +253,9 @@ const executeTransfer = (username, { amount, recipient }, lang) =>
     if (credit.rowCount === 0) return { ok: false, message: t("recipientNotFound", lang, recipient) };
 
     await db.query(
-      "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, 'Transfer', $2, $3), ($3, 'Received', $2, $1)",
-      [username, amount, recipient]
+      `INSERT INTO transactions (username, type, amount, to_user, note)
+       VALUES ($1, 'Transfer', $2, $3, $4), ($3, 'Received', $2, $1, $4)`,
+      [username, amount, recipient, note]
     );
 
     const balance = debit.rows[0].balance;
@@ -249,8 +263,9 @@ const executeTransfer = (username, { amount, recipient }, lang) =>
   });
 
 // NOTE: airtime is still simulated; no telco/payment provider is called yet.
-const executeAirtime = (username, { amount, phone }, lang) =>
+const executeAirtime = (username, { amount, phone, network }, lang) =>
   withTransaction(async (db) => {
+    if (!phone || !network) return { ok: false, message: t("askAirtimePhone", lang, amount) };
     const debit = await db.query(
       "UPDATE users SET balance = balance - $1 WHERE username=$2 AND balance >= $1 RETURNING balance",
       [amount, username]
@@ -262,11 +277,12 @@ const executeAirtime = (username, { amount, phone }, lang) =>
 
     await db.query(
       "INSERT INTO transactions (username, type, amount, to_user) VALUES ($1, 'Airtime', $2, $3)",
-      [username, amount, phone || "Self"]
+      [username, amount, `${phone} (${network})`]
     );
+    await db.query("UPDATE users SET airtime_phone=$1, airtime_network=$2 WHERE username=$3", [phone, network, username]);
 
     const balance = debit.rows[0].balance;
-    return { ok: true, balance, message: t("airtimeSuccess", lang, amount, balance) };
+    return { ok: true, balance, message: t("airtimeSuccess", lang, amount, balance, phone, network) };
   });
 
 // Esusu contribution confirmed in chat. contribute() re-checks everything
@@ -279,22 +295,60 @@ const executeEsusu = async (username, { groupId }, lang) => {
 
 const executors = { transfer: executeTransfer, airtime: executeAirtime, esusu: executeEsusu };
 
-const HISTORY_ICONS = {
-  Airtime: "📱", Transfer: "💸", Received: "💰", "Bill Payment": "🧾",
-  "Esusu Contribution": "🤝", "Esusu Payout": "🎉", "Esusu Refund": "↩️",
+const historyHelpers = { t, naira, historyLabel };
+
+// --------- Airtime: fill in the number and network, then confirm ----------
+// A request missing the phone number or network is saved as a pending action that is
+// "awaiting" that detail; the user's next message ("08031234567", "MTN") completes it.
+const continueAirtime = async (username, action, lang, reply) => {
+  const { amount, phone, network } = action;
+  if (!phone) {
+    await savePendingAction(username, { type: "airtime", amount, awaiting: "phone" }, lang);
+    return reply(lang, t("askAirtimePhone", lang, amount), { awaitingInput: "phone" });
+  }
+  if (!network) {
+    await savePendingAction(username, { type: "airtime", amount, phone, awaiting: "network" }, lang);
+    return reply(lang, t("askAirtimeNetwork", lang, phone), { awaitingInput: "network" });
+  }
+  const ready = { type: "airtime", amount, phone, network };
+  await savePendingAction(username, ready, lang);
+  return reply(lang, t("confirmAirtime", lang, amount, phone, network), { awaitingConfirmation: true, pendingAction: ready });
 };
 
-const formatHistory = (rows, lang) => {
-  if (!rows.length) return t("historyEmpty", lang);
-  const lines = rows.map((tx) => {
-    const date = new Date(tx.date).toLocaleString("en-NG", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    const icon = HISTORY_ICONS[tx.type] || "💳";
-    let party = "";
-    if (tx.type === "Received") party = ` ← ${tx.to_user}`;
-    else if (tx.to_user && tx.to_user !== "Self") party = ` → ${tx.to_user}`;
-    return `${icon} ${date} — ${tx.type} ${naira(tx.amount)}${party}`;
-  });
-  return `${t("historyHeader", lang)}\n\n${lines.join("\n")}`;
+// Asking again for whatever an incomplete action still needs.
+const askAgain = (action, lang) =>
+  action.awaiting === "network" ? t("askAirtimeNetwork", lang, action.phone) : t("askAirtimePhone", lang, action.amount);
+
+const peekPendingAction = async (username) =>
+  (await pool.query(
+    "SELECT action, language, (expires_at > NOW()) AS valid FROM pending_actions WHERE username=$1",
+    [username]
+  )).rows[0] ?? null;
+
+// A similar existing username, for "Did you mean …?" (voice input often mishears names).
+const suggestUsername = async (name) => {
+  const { rows } = await pool.query(
+    "SELECT username FROM users WHERE LENGTH(username) BETWEEN $1 AND $2 LIMIT 2000",
+    [Math.max(name.length - 2, 1), name.length + 2]
+  );
+  return closestMatch(name, rows.map((r) => r.username));
+};
+
+// --------- "bola sent you ₦500" ----------
+// Money received since the user was last told, then marks it as told. Returns text or null.
+const receivedNotice = async (username, lang) => {
+  const { rows } = await pool.query(
+    `WITH prev AS (SELECT last_seen_at FROM users WHERE username=$1),
+          seen AS (UPDATE users SET last_seen_at = NOW() WHERE username=$1)
+     SELECT t.to_user, t.amount, t.note FROM transactions t, prev
+     WHERE t.username=$1 AND t.type='Received' AND prev.last_seen_at IS NOT NULL AND t.date > prev.last_seen_at
+     ORDER BY t.date DESC, t.id DESC LIMIT 20`,
+    [username]
+  );
+  if (!rows.length) return null;
+  const items = rows.slice(0, 3).map((r) => t("receivedItem", lang, r.to_user, r.amount, r.note));
+  if (rows.length > 3) items.push(t("receivedMore", lang, rows.length - 3));
+  return t("receivedWhileAway", lang, items.join(", "));
 };
 
 // --------- Gemini AI Function ----------
@@ -436,12 +490,14 @@ app.post("/login", async (req, res) => {
 
     loginLimiter.reset(limitKey);
     const info = languageInfo(user);
+    const notice = await receivedNotice(user.username, info.language);
     res.json({
       token: signToken(user),
       username: user.username,
       balance: user.balance,
       ...info,
       welcomeMessage: t("welcome", info.language, user.username),
+      ...(notice && { notice }),
     });
   } catch (err) {
     console.error("Login error:", err);
@@ -455,14 +511,28 @@ app.get("/me", requireAuth, async (req, res) => {
     const { rows } = await pool.query("SELECT * FROM users WHERE username=$1", [req.username]);
     if (!rows.length) return fail(res, 401, "english", "accountNotFound");
     const info = languageInfo(rows[0]);
+    const notice = await receivedNotice(rows[0].username, info.language);
     res.json({
       username: rows[0].username,
       balance: rows[0].balance,
       ...info,
       welcomeMessage: t("welcomeBack", info.language, rows[0].username, rows[0].balance),
+      ...(notice && { notice }),
     });
   } catch (err) {
     console.error("Me error:", err);
+    fail(res, 500, "english", "serverError");
+  }
+});
+
+// Light-weight balance refresh for the header (no side effects).
+app.get("/balance", requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT balance FROM users WHERE username=$1", [req.username]);
+    if (!rows.length) return fail(res, 401, "english", "accountNotFound");
+    res.json({ balance: rows[0].balance });
+  } catch (err) {
+    console.error("Balance error:", err);
     fail(res, 500, "english", "serverError");
   }
 });
@@ -511,14 +581,18 @@ app.post("/action", requireAuth, async (req, res) => {
 
     if (typeof text !== "string" || !text.trim()) return fail(res, 400, current, "missingText");
 
+    // Money that arrived since the last message ("bola sent you ₦500"), shown before the reply.
+    const notice = await receivedNotice(username, current);
+
     let languageSuggestion; // set below if the user writes in a different language
     const reply = (language, message, extra = {}) =>
       res.json({
         message,
-        speak: toSpeech(message),
+        speak: toSpeech(notice ? `${notice} ${message}` : message),
         language,
         languagePreference: preference ?? "auto",
         balance: user.balance,
+        ...(notice && { notice }),
         ...(languageSuggestion && { languageSuggestion }),
         ...extra,
       });
@@ -531,9 +605,37 @@ app.post("/action", requireAuth, async (req, res) => {
       const lang = pending.language;
       if (!pending.valid) return reply(lang, t("expired", lang));
       if (answer === "no") return reply(lang, t("cancelled", lang));
+      // "Yes" to "which number?" isn't an answer: keep waiting and ask again.
+      if (pending.action.awaiting) {
+        await savePendingAction(username, pending.action, lang);
+        return reply(lang, askAgain(pending.action, lang), { awaitingInput: pending.action.awaiting });
+      }
 
       const result = await executors[pending.action.type](username, pending.action, lang);
       return reply(lang, result.message, result.ok ? { balance: result.balance } : {});
+    }
+
+    // 1b. The missing detail of an earlier request ("08031234567" after "which number?", "MTN")
+    const pending = await peekPendingAction(username);
+    if (pending?.valid && pending.action.awaiting) {
+      const lang = pending.language;
+      const phone = extractPhone(text);
+      const network = extractNetwork(text);
+      const action = { ...pending.action };
+      if (action.awaiting === "phone" && phone) {
+        action.phone = phone;
+        action.network = network || networkForPhone(phone);
+      } else if (action.awaiting === "network" && network) {
+        action.network = network;
+      }
+      if (action.phone !== pending.action.phone || action.network !== pending.action.network) {
+        if (user.balance < action.amount) {
+          await clearPendingAction(username);
+          return reply(lang, t("insufficientFunds", lang, user.balance, action.amount));
+        }
+        return continueAirtime(username, action, lang, reply);
+      }
+      // Anything else is a new request; fall through.
     }
 
     // Any other message drops an earlier unconfirmed request.
@@ -581,25 +683,32 @@ app.post("/action", requireAuth, async (req, res) => {
         if (limitError) return reply(lang, limitError);
 
         const recipientUser = await findUser(recipient);
-        if (!recipientUser) return reply(lang, t("recipientNotFound", lang, recipient));
+        if (!recipientUser) {
+          // Never sends to the guess: the user has to ask again with the right name.
+          const suggestion = await suggestUsername(recipient);
+          return reply(lang, suggestion ? t("didYouMean", lang, recipient, suggestion) : t("recipientNotFound", lang, recipient));
+        }
         if (recipientUser.id === user.id) return reply(lang, t("selfTransfer", lang));
         if (user.balance < amount) return reply(lang, t("insufficientFunds", lang, user.balance, amount));
 
-        const action = { type: "transfer", amount, recipient: recipientUser.username };
+        const note = parsed.note || null;
+        const action = { type: "transfer", amount, recipient: recipientUser.username, note };
         await savePendingAction(username, action, lang);
-        return reply(lang, t("confirmTransfer", lang, amount, recipientUser.username), { awaitingConfirmation: true, pendingAction: action });
+        return reply(lang, t("confirmTransfer", lang, amount, recipientUser.username, note), { awaitingConfirmation: true, pendingAction: action });
       }
 
       case "airtime": {
-        const { amount, phone } = parsed;
+        const { amount } = parsed;
         if (!amount) return reply(lang, t("askAirtimeAmount", lang));
         const limitError = checkLimits("airtime", amount, lang);
         if (limitError) return reply(lang, limitError);
         if (user.balance < amount) return reply(lang, t("insufficientFunds", lang, user.balance, amount));
 
-        const action = { type: "airtime", amount, phone };
-        await savePendingAction(username, action, lang);
-        return reply(lang, t("confirmAirtime", lang, amount, phone), { awaitingConfirmation: true, pendingAction: action });
+        // No number given: use the one airtime was last bought for (shown in the confirmation).
+        const phone = parsed.phone || user.airtime_phone || null;
+        const savedNetwork = phone && phone === user.airtime_phone ? user.airtime_network : null;
+        const network = parsed.network || savedNetwork || networkForPhone(phone);
+        return continueAirtime(username, { amount, phone, network }, lang, reply);
       }
 
       case "esusu_pay": {
@@ -629,12 +738,11 @@ app.post("/action", requireAuth, async (req, res) => {
       }
 
       case "history": {
-        const { rows } = await pool.query(
-          "SELECT * FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 10",
-          [username]
-        );
-        return reply(lang, formatHistory(rows, lang), {
-          speak: toSpeech(t(rows.length ? "historyHeader" : "historyEmpty", lang)),
+        const history = await queryHistory(pool, username, parsed.history ?? {}, { limit: 10 });
+        const spoken = historySpeech(history, lang, historyHelpers);
+        return reply(lang, formatHistory(history, lang, historyHelpers), {
+          speak: toSpeech(notice ? `${notice} ${spoken}` : spoken),
+          historyFilter: history.filter,
         });
       }
 
@@ -673,17 +781,22 @@ Language preference: ${lang}
 // "/history/:username" is kept for old clients but only works for your own username.
 // Returns the raw rows plus a ready-to-show, translated message.
 app.get(["/history", "/history/:username"], requireAuth, requireSameUser, loadLanguage, async (req, res) => {
-  const username = req.username;
-
+  // Optional query: ?type=sent|received|airtime|bills|esusu|money_out &period=today|…|last_days
+  // &days=N &with=username &limit=1-100 &before=<transaction id> (for "load more").
+  const { type, period, days, with: counterparty, limit, before } = req.query;
   try {
-    const result = await pool.query(
-      "SELECT * FROM transactions WHERE username=$1 ORDER BY date DESC LIMIT 20",
-      [username]
+    const history = await queryHistory(
+      pool,
+      req.username,
+      { type, period, days, counterparty },
+      { limit: Number(limit) || 20, beforeId: Number(before) || null }
     );
     res.json({
-      transactions: result.rows,
-      message: formatHistory(result.rows, req.lang),
-      speak: toSpeech(t(result.rows.length ? "historyHeader" : "historyEmpty", req.lang)),
+      transactions: history.rows,
+      totals: history.totals,
+      filter: history.filter,
+      message: formatHistory(history, req.lang, historyHelpers),
+      speak: toSpeech(historySpeech(history, req.lang, historyHelpers)),
       language: req.lang,
     });
   } catch (err) {
