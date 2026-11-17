@@ -3,9 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <base href="/" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>owo</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f4ec" />
+    <meta name="description" content="SARA: a voice money assistant that speaks English, Pidgin, Yoruba, Igbo and Hausa." />
+    <title>SARA — Your Money Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet" />
+    <script>
+      // Apply the saved light/dark choice before the page draws (see src/theme.js).
+      try {
+        var t = localStorage.getItem("sara_theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+        var dark = t === "dark" || (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#0f1512" : "#f7f4ec");
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -3,7 +3,7 @@
 import { screenText } from "./screenText";
 
 export const LANGUAGE_OPTIONS = [
-  { value: "auto", label: "🌐 Auto" },
+  { value: "auto", label: "Auto" },
   { value: "english", label: "English" },
   { value: "pidgin", label: "Pidgin" },
   { value: "yoruba", label: "Yorùbá" },
@@ -107,18 +107,18 @@ const strings = {
     hausa: (name) => `Canza zuwa ${name}?`,
   },
   confirmYes: {
-    english: "✅ Yes, confirm",
-    pidgin: "✅ Yes, do am",
-    yoruba: "✅ Beeni",
-    igbo: "✅ Ee",
-    hausa: "✅ Eh",
+    english: "Yes, confirm",
+    pidgin: "Yes, do am",
+    yoruba: "Beeni",
+    igbo: "Ee",
+    hausa: "Eh",
   },
   confirmNo: {
-    english: "❌ No, cancel",
-    pidgin: "❌ No, cancel am",
-    yoruba: "❌ Rara",
-    igbo: "❌ Mba",
-    hausa: "❌ A'a",
+    english: "No, cancel",
+    pidgin: "No, cancel am",
+    yoruba: "Rara",
+    igbo: "Mba",
+    hausa: "A'a",
   },
 };
 

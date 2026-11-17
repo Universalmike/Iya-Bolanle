@@ -1,68 +1,217 @@
+/* Base styles and colour tokens for SARA. Component styles live in styles.css. */
+
+/* ----- Colour tokens: light ("warm & local") ----- */
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  color-scheme: light;
+  --bg: #f7f4ec;
+  --surface: #ffffff;
+  --surface-2: #f7f4ec;
+  --border: #e6e0cf;
+  --border-strong: #cfc7b2;
+  --text: #1b2a22;
+  --muted: #55615a;
+  --primary: #0f5c3e;
+  --primary-hover: #0a4430;
+  --on-primary: #ffffff;
+  --on-primary-muted: #d3eadf;
+  --primary-soft: #e2efe7;
+  --primary-soft-text: #0f5c3e;
+  --gold: #e3a72f;
+  --on-gold: #1b2a22;
+  --gold-shadow: rgba(160, 110, 10, 0.28);
+  --notice-bg: #fff3d1;
+  --notice-border: #e8c468;
+  --notice-text: #4a3500;
+  --danger-bg: #fde8dc;
+  --danger-border: #f0b79a;
+  --danger-text: #6b2410;
+  --late: #9a3412;
+  --success-text: #0f5c3e;
+  --user-bubble: #dcebe2;
+  --user-bubble-text: #12382a;
+  --pill-warn-bg: #fbebd0;
+  --pill-warn-text: #7a4a00;
+  --pill-neutral-bg: #ece9e1;
+  --pill-neutral-text: #3f4743;
+  --track: #ece6d6;
+  --focus: #0f5c3e;
+  --shadow: 0 1px 2px rgba(27, 42, 34, 0.06);
+}
+
+/* ----- Colour tokens: dark (same look, warm green-black) ----- */
+/* Applied when the phone is in dark mode (unless the user chose Light), or when the user chose Dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0f1512;
+    --surface: #18211c;
+    --surface-2: #121a16;
+    --border: #26332b;
+    --border-strong: #3a4a40;
+    --text: #eef2ec;
+    --muted: #a7b4ab;
+    --primary: #1f7a54;
+    --primary-hover: #25905f;
+    --on-primary: #ffffff;
+    --on-primary-muted: #cfeadc;
+    --primary-soft: #1e3a2d;
+    --primary-soft-text: #8fd9b4;
+    --gold: #e3a72f;
+    --on-gold: #1b2a22;
+    --gold-shadow: rgba(0, 0, 0, 0.4);
+    --notice-bg: #2a2210;
+    --notice-border: #6b5413;
+    --notice-text: #fde68a;
+    --danger-bg: #2e1810;
+    --danger-border: #7a3a22;
+    --danger-text: #fdba9a;
+    --late: #fdba74;
+    --success-text: #8fd9b4;
+    --user-bubble: #1e3a2d;
+    --user-bubble-text: #ddf3e6;
+    --pill-warn-bg: #3a2a08;
+    --pill-warn-text: #fcd34d;
+    --pill-neutral-bg: #26332b;
+    --pill-neutral-text: #cbd5cf;
+    --track: #26332b;
+    --focus: #8fd9b4;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f1512;
+  --surface: #18211c;
+  --surface-2: #121a16;
+  --border: #26332b;
+  --border-strong: #3a4a40;
+  --text: #eef2ec;
+  --muted: #a7b4ab;
+  --primary: #1f7a54;
+  --primary-hover: #25905f;
+  --on-primary: #ffffff;
+  --on-primary-muted: #cfeadc;
+  --primary-soft: #1e3a2d;
+  --primary-soft-text: #8fd9b4;
+  --gold: #e3a72f;
+  --on-gold: #1b2a22;
+  --gold-shadow: rgba(0, 0, 0, 0.4);
+  --notice-bg: #2a2210;
+  --notice-border: #6b5413;
+  --notice-text: #fde68a;
+  --danger-bg: #2e1810;
+  --danger-border: #7a3a22;
+  --danger-text: #fdba9a;
+  --late: #fdba74;
+  --success-text: #8fd9b4;
+  --user-bubble: #1e3a2d;
+  --user-bubble-text: #ddf3e6;
+  --pill-warn-bg: #3a2a08;
+  --pill-warn-text: #fcd34d;
+  --pill-neutral-bg: #26332b;
+  --pill-neutral-text: #cbd5cf;
+  --track: #26332b;
+  --focus: #8fd9b4;
+  --shadow: none;
+}
+
+/* ----- Base ----- */
+:root {
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   line-height: 1.5;
-  font-weight: 400;
-
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  color: var(--text);
+  background-color: var(--bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
   min-width: 320px;
   min-height: 100vh;
+  background: var(--bg);
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
 }
 
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
   cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+input::placeholder {
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
-  a:hover {
-    color: #747bff;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
   }
-  button {
-    background-color: #f9f9f9;
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(227, 167, 47, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 18px rgba(227, 167, 47, 0);
+  }
+}
+
+@keyframes blink {
+  0%, 80%, 100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  /* Keep the loading spinner turning, slowly, so it still reads as "busy". */
+  .spinner {
+    animation-duration: 2.5s !important;
+    animation-iteration-count: infinite !important;
   }
 }

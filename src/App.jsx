@@ -1,9 +1,13 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { api, loadSession, saveSession, clearSession, UNAUTHORIZED_EVENT } from "./api";
+import { SPEECH_CODES, ui, loadLanguageChoice, saveLanguageChoice } from "./i18n";
+import { loadTheme, saveTheme, applyTheme } from "./theme";
+import { TabBar } from "./components";
+import LoginScreen from "./LoginScreen";
+import ChatScreen from "./ChatScreen";
 import EsusuView from "./EsusuView";
-import {
-  LANGUAGE_OPTIONS, SPEECH_CODES, languageLabel, ui, loadLanguageChoice, saveLanguageChoice,
-} from "./i18n";
+import BillsScreen from "./BillsScreen";
+import MeScreen from "./MeScreen";
 
 // Phone photos are often 3-10MB; shrink to a JPEG that is still sharp enough to read.
 // Falls back to the original file if the browser can't decode it (e.g. HEIC on Chrome).
@@ -34,8 +38,10 @@ const shrinkImage = (file, maxSide = 1600, quality = 0.85) =>
   });
 
 // The first chat bubbles after login: the welcome, plus any "bola sent you ₦500" notice.
-const welcomeMessages = (data) =>
-  [data.welcomeMessage, data.notice].filter(Boolean).map((text) => ({ role: "assistant", text }));
+const welcomeMessages = (data) => [
+  { role: "assistant", text: data.welcomeMessage },
+  ...(data.notice ? [{ role: "notice", text: data.notice }] : []),
+];
 
 // Picks a browser voice for the language. Most browsers have no Yoruba, Igbo or
 // Hausa voice; then the (accent-stripped) text is read by a Nigerian/English voice.
@@ -56,39 +62,56 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   // True while a saved session is being checked on page load
   const [isRestoring, setIsRestoring] = useState(() => Boolean(loadSession()));
+  const [tab, setTab] = useState("chat"); // chat | esusu | bills | me
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   // True while SARA is waiting for "yes"/"no" on a transfer or airtime purchase
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
-  // The language SARA is currently replying in, the saved preference
-  // ("auto" or a language), and an offer to switch when the user writes in another one.
   // The language SARA replies in and the screen is shown in. Before login it follows
   // the choice on the login screen ("auto" shows English until the account is known).
   const [language, setLanguage] = useState(() => {
     const choice = loadLanguageChoice();
     return choice !== "auto" ? choice : "english";
   });
+  // The saved preference ("auto" or a language), and an offer to switch when the user writes in another one.
   const [languagePref, setLanguagePref] = useState(() => loadLanguageChoice());
   const [languageSuggestion, setLanguageSuggestion] = useState(null);
+  const [theme, setTheme] = useState(loadTheme); // system | light | dark
   const [balance, setBalance] = useState(null);
+  const [refreshingBalance, setRefreshingBalance] = useState(false);
+  // Message on the login screen (signup result, login error, session expired): { ok, text }.
+  const [loginNotice, setLoginNotice] = useState(null);
   const recognitionRef = useRef(null);
   const [isListening, setIsListening] = useState(false);
   const chatEndRef = useRef(null);
-  const [showEsusu, setShowEsusu] = useState(false);
   const [esusuGroups, setEsusuGroups] = useState([]);
-  const [showBillScanner, setShowBillScanner] = useState(false);
   const [scannedBill, setScannedBill] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isPayingBill, setIsPayingBill] = useState(false);
   const [billAmount, setBillAmount] = useState("");
-  const [billNotice, setBillNotice] = useState("");
+  const [billNotice, setBillNotice] = useState(null); // { kind: success|error|gold, text }
   const fileInputRef = useRef(null);
 
-  // Auto-scroll to bottom
+  // Keep the newest message in view (also when coming back to the Chat tab).
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, tab, isThinking]);
+
+  // ------------------------- Theme -------------------------
+  const changeTheme = (value) => {
+    setTheme(value);
+    saveTheme(value);
+  };
+  useEffect(() => {
+    applyTheme(theme);
+    if (theme !== "system" || !window.matchMedia) return;
+    // Following the phone: update the browser bar colour when the phone switches.
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyTheme("system");
+    media.addEventListener?.("change", onChange);
+    return () => media.removeEventListener?.("change", onChange);
+  }, [theme]);
 
   // ------------------------- Language -------------------------
   // Every server reply says which language it used; keep the UI in step.
@@ -109,10 +132,10 @@ export default function App() {
 
     // Remove emojis and special characters for speech
     const cleanText = text
-      .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Remove emojis (proper unicode range)
-      .replace(/[\u{2600}-\u{26FF}]/gu, '') // Remove misc symbols
-      .replace(/[\u{2700}-\u{27BF}]/gu, '') // Remove dingbats
-      .replace(/₦/g, 'Naira ') // Replace Naira symbol with word
+      .replace(/[\u{1F300}-\u{1F9FF}]/gu, "")
+      .replace(/[\u{2600}-\u{26FF}]/gu, "")
+      .replace(/[\u{2700}-\u{27BF}]/gu, "")
+      .replace(/₦/g, "Naira ")
       .trim();
 
     const utter = new SpeechSynthesisUtterance(cleanText);
@@ -130,12 +153,15 @@ export default function App() {
   };
 
   // Shows and speaks a server reply (success or error) and syncs the language.
-  // A "notice" (e.g. "bola sent you ₦500") is shown as its own bubble before the reply.
+  // A "notice" (e.g. "bola sent you ₦500") is shown as its own banner before the reply.
   const showReply = (data, fallbackText) => {
     const text = data?.message || fallbackText;
-    if (data?.notice) addAssistantMessage(data.notice);
+    setMessages((prev) => [
+      ...prev,
+      ...(data?.notice ? [{ role: "notice", text: data.notice }] : []),
+      { role: "assistant", text },
+    ]);
     if (typeof data?.balance === "number") setBalance(data.balance);
-    addAssistantMessage(text);
     applyLanguage(data);
     speakText(data?.speak || text, data?.language || language);
   };
@@ -164,9 +190,9 @@ export default function App() {
   const handleSignup = async () => {
     try {
       const res = await api.post(`/signup`, { username, password, language: loginLanguage() });
-      alert(res.data.message);
+      setLoginNotice({ ok: true, text: res.data.message });
     } catch (err) {
-      alert(err.response?.data?.message || ui("genericError", language));
+      setLoginNotice({ ok: false, text: err.response?.data?.message || ui("genericError", language) });
     }
   };
 
@@ -177,12 +203,14 @@ export default function App() {
       setUsername(res.data.username);
       setPassword("");
       setIsLoggedIn(true);
+      setTab("chat");
       setBalance(res.data.balance);
       applyLanguage(res.data);
       setMessages(welcomeMessages(res.data));
+      setLoginNotice(null);
       speakText([res.data.welcomeMessage, res.data.notice].filter(Boolean).join(" "), res.data.language);
     } catch (err) {
-      alert(err.response?.data?.message || ui("genericError", language));
+      setLoginNotice({ ok: false, text: err.response?.data?.message || ui("genericError", language) });
     }
   };
 
@@ -190,17 +218,16 @@ export default function App() {
     clearSession();
     window.speechSynthesis?.cancel();
     setIsLoggedIn(false);
+    setTab("chat");
     setBalance(null);
     setMessages([]);
     setAwaitingConfirm(false);
     setLanguageSuggestion(null);
     setUsername("");
     setPassword("");
-    setShowEsusu(false);
-    setShowBillScanner(false);
     setEsusuGroups([]);
     setScannedBill(null);
-    setBillNotice("");
+    setBillNotice(null);
     setBillAmount("");
   }, []);
 
@@ -228,7 +255,7 @@ export default function App() {
   useEffect(() => {
     const onUnauthorized = () => {
       logout();
-      alert(ui("sessionExpired", languageRef.current));
+      setLoginNotice({ ok: false, text: ui("sessionExpired", languageRef.current) });
     };
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
@@ -238,11 +265,14 @@ export default function App() {
   // Replies carry the balance after each action; this also catches money that
   // arrived from someone else while the tab was in the background.
   const refreshBalance = async () => {
+    setRefreshingBalance(true);
     try {
       const res = await api.get("/balance");
       setBalance(res.data.balance);
     } catch {
       // keep showing the last known balance
+    } finally {
+      setRefreshingBalance(false);
     }
   };
 
@@ -283,10 +313,13 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (isLoggedIn) {
-      fetchEsusuGroups();
-    }
+    if (isLoggedIn) fetchEsusuGroups();
   }, [isLoggedIn]);
+
+  // Opening the Esusu tab shows fresh rounds and payments.
+  useEffect(() => {
+    if (isLoggedIn && tab === "esusu") fetchEsusuGroups();
+  }, [tab, isLoggedIn]);
 
   // ------------------------- Bill Scanner Functions -------------------------
   // The server reads the photo with Gemini and stores the bill; we only send its id to pay.
@@ -295,24 +328,26 @@ export default function App() {
     event.target.value = ""; // lets the same photo be picked again after an error
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      alert(ui("notAnImage", language));
+    if (!file.type.startsWith("image/")) {
+      setBillNotice({ kind: "error", text: ui("notAnImage", language) });
       return;
     }
 
     setIsScanning(true);
     setScannedBill(null);
-    setBillNotice("");
+    setBillNotice(null);
     try {
       const imageData = await shrinkImage(file);
       const res = await api.post(`/scan-bill`, { imageData });
-      setScannedBill(res.data.billData);
-      setBillAmount(res.data.billData.amount ? String(res.data.billData.amount) : "");
-      setBillNotice(res.data.message);
+      const bill = res.data.billData;
+      setScannedBill(bill);
+      setBillAmount(bill.amount ? String(bill.amount) : "");
+      // Overdue or possibly already paid: a warning, not a plain success.
+      setBillNotice({ kind: res.data.possibleDuplicate || bill.overdue ? "gold" : "success", text: res.data.message });
       showReply(res.data);
     } catch (err) {
       const message = err.response?.data?.message || ui("scanFailed", language);
-      setBillNotice(message);
+      setBillNotice({ kind: "error", text: message });
       showReply(err.response?.data, message);
     } finally {
       setIsScanning(false);
@@ -327,11 +362,11 @@ export default function App() {
       const res = await api.post(`/pay-bill`, { billId: scannedBill.id, amount: amount || null });
       showReply(res.data);
       setScannedBill(null);
-      setBillNotice("");
-      setShowBillScanner(false);
+      setBillAmount("");
+      setBillNotice({ kind: "success", text: res.data.message });
     } catch (err) {
       const message = err.response?.data?.message || ui("genericError", language);
-      setBillNotice(message);
+      setBillNotice({ kind: "error", text: message });
       showReply(err.response?.data, message);
       // Already paid or expired: this scan can't be used again.
       if ([404, 409, 410].includes(err.response?.status)) setScannedBill(null);
@@ -363,6 +398,7 @@ export default function App() {
 
     setMessages((prev) => [...prev, { role: "user", text }]);
     setInput("");
+    setAwaitingConfirm(false);
     setIsThinking(true);
 
     try {
@@ -427,786 +463,91 @@ export default function App() {
     setIsListening(false);
   };
 
-  const languagePicker = (
-    <select
-      value={languagePref}
-      onChange={(e) => changeLanguage(e.target.value)}
-      style={styles.languageSelect}
-      aria-label={ui("languageAria", language)}
-    >
-      {LANGUAGE_OPTIONS.map((o) => (
-        <option key={o.value} value={o.value}>{o.label}</option>
-      ))}
-    </select>
-  );
-
   // ------------------------- Render -------------------------
   if (isRestoring) {
     return (
-      <div style={styles.container}>
-        <p style={styles.subtitle}>{ui("loading", language)}</p>
-      </div>
+      <main className="login" aria-busy="true">
+        <div className="scanning" role="status">
+          <div className="spinner" aria-hidden="true"></div>
+          <p>{ui("loading", language)}</p>
+        </div>
+      </main>
     );
   }
 
   if (!isLoggedIn) {
     return (
-      <div style={styles.container}>
-        <div style={styles.card}>
-          <div style={styles.header}>
-            <div>
-              <h1 style={styles.title}>💸 SARA</h1>
-              <p style={styles.subtitle}>{ui("tagline", language)}</p>
-            </div>
-            {languagePicker}
-          </div>
-          <input
-            placeholder={ui("usernamePlaceholder", language)}
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            style={styles.input}
-            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-          />
-          <input
-            type="password"
-            placeholder={ui("passwordPlaceholder", language)}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            style={styles.input}
-            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={handleLogin} style={styles.buttonPrimary}>
-              {ui("login", language)}
-            </button>
-            <button onClick={handleSignup} style={styles.buttonSecondary}>
-              {ui("signup", language)}
-            </button>
-          </div>
-          <p style={styles.infoText}>
-            {ui("loginInfo", language)}
-          </p>
-        </div>
-      </div>
+      <LoginScreen
+        lang={language}
+        languagePref={languagePref}
+        onChangeLanguage={changeLanguage}
+        username={username}
+        password={password}
+        setUsername={setUsername}
+        setPassword={setPassword}
+        onLogin={handleLogin}
+        onSignup={handleSignup}
+        notice={loginNotice}
+        onDismissNotice={() => setLoginNotice(null)}
+      />
     );
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.card}>
-        <div style={styles.header}>
-          <div>
-            <h2 style={styles.title}>{ui("chatTitle", language)}</h2>
-            {balance !== null && (
-              <button onClick={refreshBalance} style={styles.balancePill} title={ui("refreshBalance", language)}>
-                💰 ₦{Number(balance).toLocaleString("en-NG")}
-              </button>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {languagePicker}
-            <button
-              onClick={() => {
-                setShowEsusu(false);
-                setShowBillScanner(!showBillScanner);
-                setBillNotice("");
-              }}
-              style={{
-                ...styles.esusuButton,
-                background: showBillScanner ? "#7c3aed" : "rgba(124,58,237,0.1)"
-              }}
-            >
-              {ui(showBillScanner ? "navChat" : "navBills", language)}
-            </button>
-            <button 
-              onClick={() => {
-                setShowBillScanner(false);
-                setShowEsusu(!showEsusu);
-              }} 
-              style={{
-                ...styles.esusuButton,
-                background: showEsusu ? "#7c3aed" : "rgba(124,58,237,0.1)"
-              }}
-            >
-              {ui(showEsusu ? "navChat" : "navEsusu", language)}
-            </button>
-            <button 
-              onClick={logout}
-              style={styles.logoutButton}
-            >
-              {ui("logout", language)}
-            </button>
-          </div>
-        </div>
-
-        {showBillScanner ? (
-          <BillScannerView
-            onImageUpload={handleImageUpload}
-            scannedBill={scannedBill}
-            isScanning={isScanning}
-            onPayBill={handlePayBill}
-            fileInputRef={fileInputRef}
-            notice={billNotice}
-            amount={billAmount}
-            onAmountChange={setBillAmount}
-            isPaying={isPayingBill}
-            lang={language}
-          />
-        ) : showEsusu ? (
-          <EsusuView groups={esusuGroups} onAction={esusuAction} styles={styles} lang={language} />
-        ) : (
-          <>
-            <div style={styles.chatWindow}>
-              {messages.map((m, idx) => (
-                <div
-                  key={idx}
-                  style={{
-                    ...styles.bubble,
-                    background: m.role === "user" ? "#1f2937" : "#4b5563",
-                    alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                    maxWidth: "80%",
-                  }}
-                >
-                  {m.text}
-                </div>
-              ))}
-              {isThinking && (
-                <div style={{ ...styles.bubble, background: "#4b5563" }}>
-                  {ui("thinking", language)}
-                </div>
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            {awaitingConfirm && (
-              <div style={styles.confirmBar}>
-                <button
-                  onClick={() => handleSend("yes")}
-                  style={styles.confirmYes}
-                  disabled={isThinking}
-                >
-                  {ui("confirmYes", language)}
-                </button>
-                <button
-                  onClick={() => handleSend("no")}
-                  style={styles.confirmNo}
-                  disabled={isThinking}
-                >
-                  {ui("confirmNo", language)}
-                </button>
-              </div>
-            )}
-
-            {languageSuggestion && (
-              <div style={styles.confirmBar}>
-                <button
-                  onClick={() => changeLanguage(languageSuggestion)}
-                  style={styles.quickButton}
-                >
-                  🌐 {ui("switchTo", languageSuggestion, languageLabel(languageSuggestion))}
-                </button>
-                <button
-                  onClick={() => setLanguageSuggestion(null)}
-                  style={styles.backButton}
-                  aria-label={ui("dismiss", language)}
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-
-            <div style={styles.quickActions}>
-              <button 
-                onClick={() => handleSend("check balance", { quick: true })}
-                style={styles.quickButton}
-                disabled={isThinking}
-              >
-                {ui("quickBalance", language)}
-              </button>
-              <button 
-                onClick={() => handleSend("buy 100 airtime", { quick: true })}
-                style={styles.quickButton}
-                disabled={isThinking}
-              >
-                {ui("quickAirtime", language)}
-              </button>
-              <button 
-                onClick={fetchHistory} 
-                style={styles.quickButton}
-                disabled={isThinking}
-              >
-                {ui("quickHistory", language)}
-              </button>
-            </div>
-
-            <div style={styles.controls}>
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={ui("inputPlaceholder", language)}
-                style={styles.chatInput}
-                onKeyDown={(e) => e.key === "Enter" && !isThinking && handleSend()}
-                disabled={isThinking}
-              />
-              <button 
-                onClick={() => handleSend()} 
-                style={styles.sendButton}
-                disabled={isThinking || !input.trim()}
-              >
-                {ui("send", language)}
-              </button>
-              <button 
-                onClick={isListening ? stopListening : () => startListening()} 
-                style={{
-                  ...styles.micButton,
-                  background: isListening ? "#ef4444" : "#7c3aed"
-                }}
-                disabled={isThinking}
-                aria-label={ui("voiceInput", language)}
-              >
-                {isListening ? "⏹️" : "🎤"}
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+    <div className="app">
+      {tab === "chat" && (
+        <ChatScreen
+          lang={language}
+          username={username}
+          balance={balance}
+          onRefreshBalance={refreshBalance}
+          refreshing={refreshingBalance}
+          languagePref={languagePref}
+          onChangeLanguage={changeLanguage}
+          languageSuggestion={languageSuggestion}
+          onAcceptSuggestion={changeLanguage}
+          onDismissSuggestion={() => setLanguageSuggestion(null)}
+          messages={messages}
+          isThinking={isThinking}
+          awaitingConfirm={awaitingConfirm}
+          chatEndRef={chatEndRef}
+          input={input}
+          setInput={setInput}
+          onSend={handleSend}
+          onHistory={fetchHistory}
+          isListening={isListening}
+          onStartListening={startListening}
+          onStopListening={stopListening}
+        />
+      )}
+      {tab === "esusu" && <EsusuView groups={esusuGroups} onAction={esusuAction} lang={language} />}
+      {tab === "bills" && (
+        <BillsScreen
+          lang={language}
+          fileInputRef={fileInputRef}
+          onImageUpload={handleImageUpload}
+          isScanning={isScanning}
+          scannedBill={scannedBill}
+          notice={billNotice}
+          onDismissNotice={() => setBillNotice(null)}
+          amount={billAmount}
+          onAmountChange={setBillAmount}
+          onPay={handlePayBill}
+          isPaying={isPayingBill}
+        />
+      )}
+      {tab === "me" && (
+        <MeScreen
+          lang={language}
+          username={username}
+          languagePref={languagePref}
+          onChangeLanguage={changeLanguage}
+          theme={theme}
+          onChangeTheme={changeTheme}
+          onLogout={logout}
+        />
+      )}
+      <TabBar tab={tab} onChange={setTab} lang={language} />
     </div>
   );
 }
-
-// ------------------------- Bill Scanner View Component -------------------------
-const BILL_ICONS = { electricity: "⚡", water: "💧", internet: "📡", cable: "📺", other: "🧾" };
-
-const formatBillDate = (iso) =>
-  new Date(`${iso}T00:00:00`).toLocaleDateString('en-NG', { year: 'numeric', month: 'long', day: 'numeric' });
-
-function BillScannerView({
-  onImageUpload, scannedBill, isScanning, onPayBill, fileInputRef, notice, amount, onAmountChange, isPaying, lang,
-}) {
-  const tr = (key, ...args) => ui(key, lang, ...args);
-  const amountValue = Number(String(amount).replace(/[₦,\s]/g, ""));
-  const canPay = Number.isFinite(amountValue) && amountValue > 0 && !isPaying;
-  const rows = scannedBill && [
-    [tr("accountNumber"), scannedBill.accountNumber],
-    [tr("meterNumber"), scannedBill.meterNumber],
-    [tr("customerName"), scannedBill.customerName],
-    [tr("billPeriod"), scannedBill.billPeriod],
-    [tr("package"), scannedBill.package],
-    [tr("dueDate"), scannedBill.dueDate && formatBillDate(scannedBill.dueDate) + (scannedBill.overdue ? " ⚠️" : "")],
-  ].filter(([, value]) => value);
-
-  return (
-    <div style={styles.esusuContainer}>
-      <h3 style={styles.esusuTitle}>{tr("billTitle")}</h3>
-      <p style={styles.esusuSubtitle}>{tr("billSubtitle")}</p>
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        onChange={onImageUpload}
-        style={{ display: 'none' }}
-      />
-
-      {notice && !isScanning && (
-        <div style={{ ...styles.infoBox, marginBottom: 16, borderColor: "rgba(124,58,237,0.4)" }}>
-          <p style={{ margin: 0, fontSize: 14, lineHeight: 1.5 }}>{notice}</p>
-        </div>
-      )}
-
-      {!scannedBill && !isScanning && (
-        <>
-          <div style={styles.uploadArea} onClick={() => fileInputRef.current?.click()}>
-            <div style={styles.uploadIcon}>📸</div>
-            <h4 style={{ margin: "16px 0 8px 0", fontSize: 18 }}>{tr("uploadTitle")}</h4>
-            <p style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>
-              {tr("uploadHint")}
-            </p>
-            <p style={{ margin: "8px 0 0 0", fontSize: 12, color: "#64748b" }}>
-              {tr("uploadSupports")}
-            </p>
-          </div>
-
-          <div style={styles.billTypeGrid}>
-            {[["⚡", tr("billTypeElectricity")], ["💧", tr("billTypeWater")], ["📡", tr("billTypeInternet")], ["📺", tr("billTypeCable")]].map(([icon, label]) => (
-              <div key={label} style={styles.billTypeCard}>
-                <div style={{ fontSize: 32, marginBottom: 8 }}>{icon}</div>
-                <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{label}</p>
-              </div>
-            ))}
-          </div>
-
-          <div style={styles.infoBox}>
-            <h4 style={{ margin: "0 0 8px 0", fontSize: 14 }}>{tr("howItWorks")}</h4>
-            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "#94a3b8" }}>
-              1. {tr("billStep1")}<br/>
-              2. {tr("billStep2")}<br/>
-              3. {tr("billStep3")}<br/>
-              4. {tr("billStep4")}
-            </p>
-          </div>
-        </>
-      )}
-
-      {isScanning && (
-        <div style={styles.scanningContainer}>
-          <div style={styles.scanningAnimation}>
-            <div style={styles.spinner}></div>
-          </div>
-          <h4 style={{ margin: "20px 0 8px 0", fontSize: 18 }}>{tr("scanningTitle")}</h4>
-          <p style={{ margin: 0, fontSize: 14, color: "#94a3b8" }}>
-            {tr("scanningHint")}
-          </p>
-        </div>
-      )}
-
-      {scannedBill && !isScanning && (
-        <div style={styles.billDetailsContainer}>
-          <div style={styles.billCard}>
-            <div style={styles.billHeader}>
-              <h4 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>
-                {BILL_ICONS[scannedBill.billType] || "🧾"} {scannedBill.provider}
-              </h4>
-              {scannedBill.amount && <div style={styles.billAmount}>₦{scannedBill.amount.toLocaleString()}</div>}
-            </div>
-
-            <div style={styles.billDetails}>
-              {rows.map(([label, value]) => (
-                <div key={label} style={styles.billDetailRow}>
-                  <span style={styles.billLabel}>{label}:</span>
-                  <span style={styles.billValue}>{value}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <label style={{ display: "block", margin: "20px 0 6px", fontSize: 14, color: "#94a3b8" }}>
-            {tr("amountToPay")}
-          </label>
-          <input
-            type="text"
-            inputMode="numeric"
-            value={amount}
-            onChange={(e) => onAmountChange(e.target.value)}
-            placeholder={tr("amountPlaceholder")}
-            style={styles.input}
-          />
-
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button
-              onClick={onPayBill}
-              disabled={!canPay}
-              style={{ ...styles.payButton, opacity: canPay ? 1 : 0.5, cursor: canPay ? "pointer" : "not-allowed" }}
-            >
-              {isPaying ? tr("paying") : canPay ? tr("payNow", `₦${amountValue.toLocaleString()}`) : tr("enterAmount")}
-            </button>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              style={styles.buttonSecondary}
-            >
-              {tr("scanAnother")}
-            </button>
-          </div>
-
-          <div style={styles.securityNote}>
-            <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>
-              {tr("billSecurity")}
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ------------------------- Styles -------------------------
-const styles = {
-  container: {
-    minHeight: "100vh",
-    background: "linear-gradient(180deg,#0f172a 0%, #060818 100%)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-    color: "#fff",
-    fontFamily: "Inter, system-ui, sans-serif",
-  },
-  card: {
-    width: 900,
-    maxWidth: "95%",
-    background: "#0b1220",
-    borderRadius: 16,
-    padding: 24,
-    boxShadow: "0 20px 50px rgba(2,6,23,0.9)",
-  },
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 20,
-  },
-  title: { 
-    margin: 0,
-    fontSize: 24,
-    fontWeight: 700,
-  },
-  balancePill: {
-    marginTop: 8,
-    padding: "4px 12px",
-    borderRadius: 999,
-    border: "1px solid rgba(34,197,94,0.4)",
-    background: "rgba(34,197,94,0.1)",
-    color: "#4ade80",
-    fontSize: 15,
-    fontWeight: 700,
-    cursor: "pointer",
-  },
-  subtitle: {
-    margin: "8px 0 0 0",
-    fontSize: 16,
-    color: "#94a3b8",
-  },
-  chatWindow: {
-    height: "55vh",
-    overflowY: "auto",
-    padding: 16,
-    borderRadius: 12,
-    background: "#081127",
-    border: "1px solid rgba(255,255,255,0.05)",
-    marginBottom: 16,
-    display: "flex",
-    flexDirection: "column",
-    gap: 8,
-  },
-  bubble: { 
-    padding: 14, 
-    borderRadius: 12, 
-    lineHeight: 1.5, 
-    whiteSpace: "pre-wrap",
-    boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-  },
-  languageSelect: {
-    padding: "8px 12px",
-    borderRadius: 8,
-    border: "1px solid rgba(124,58,237,0.3)",
-    background: "#0b1220",
-    color: "#a78bfa",
-    cursor: "pointer",
-    fontSize: 14,
-  },
-  confirmBar: {
-    display: "flex",
-    gap: 8,
-    marginBottom: 12,
-  },
-  confirmYes: {
-    flex: 1,
-    padding: "12px 16px",
-    borderRadius: 10,
-    border: "none",
-    background: "#10b981",
-    color: "#fff",
-    cursor: "pointer",
-    fontWeight: 600,
-    fontSize: 15,
-  },
-  confirmNo: {
-    flex: 1,
-    padding: "12px 16px",
-    borderRadius: 10,
-    border: "1px solid rgba(239,68,68,0.4)",
-    background: "rgba(239,68,68,0.1)",
-    color: "#f87171",
-    cursor: "pointer",
-    fontWeight: 600,
-    fontSize: 15,
-  },
-  quickActions: {
-    display: "flex",
-    gap: 8,
-    marginBottom: 12,
-    flexWrap: "wrap",
-  },
-  quickButton: {
-    padding: "8px 16px",
-    borderRadius: 8,
-    border: "1px solid rgba(124,58,237,0.3)",
-    background: "rgba(124,58,237,0.1)",
-    color: "#a78bfa",
-    cursor: "pointer",
-    fontSize: 14,
-    fontWeight: 500,
-    transition: "all 0.2s",
-  },
-  controls: { 
-    display: "flex", 
-    gap: 8, 
-    alignItems: "center" 
-  },
-  chatInput: { 
-    flex: 1, 
-    padding: "12px 16px", 
-    borderRadius: 10, 
-    border: "1px solid rgba(255,255,255,0.08)", 
-    background: "#0b1220", 
-    color: "#fff",
-    fontSize: 15,
-  },
-  input: { 
-    width: "100%", 
-    padding: "12px 16px", 
-    borderRadius: 10, 
-    border: "1px solid rgba(255,255,255,0.08)", 
-    background: "#0b1220", 
-    color: "#fff", 
-    marginBottom: 12,
-    fontSize: 15,
-  },
-  buttonPrimary: { 
-    flex: 1,
-    padding: "12px 16px", 
-    borderRadius: 10, 
-    border: "none", 
-    background: "#7c3aed", 
-    color: "#fff", 
-    cursor: "pointer",
-    fontWeight: 600,
-    fontSize: 15,
-  },
-  buttonSecondary: {
-    flex: 1,
-    padding: "12px 16px",
-    borderRadius: 10,
-    border: "1px solid rgba(124,58,237,0.5)",
-    background: "transparent",
-    color: "#a78bfa",
-    cursor: "pointer",
-    fontWeight: 600,
-    fontSize: 15,
-  },
-  sendButton: {
-    padding: "12px 24px",
-    borderRadius: 10,
-    border: "none",
-    background: "#7c3aed",
-    color: "#fff",
-    cursor: "pointer",
-    fontWeight: 600,
-  },
-  micButton: {
-    padding: "12px 16px",
-    borderRadius: 10,
-    border: "none",
-    color: "#fff",
-    cursor: "pointer",
-    fontSize: 18,
-  },
-  logoutButton: {
-    padding: "8px 16px",
-    borderRadius: 8,
-    border: "1px solid rgba(239,68,68,0.3)",
-    background: "rgba(239,68,68,0.1)",
-    color: "#f87171",
-    cursor: "pointer",
-    fontSize: 14,
-  },
-  infoText: {
-    marginTop: 16,
-    fontSize: 13,
-    color: "#64748b",
-    textAlign: "center",
-  },
-  esusuButton: {
-    padding: "8px 16px",
-    borderRadius: 8,
-    border: "1px solid rgba(124,58,237,0.3)",
-    color: "#a78bfa",
-    cursor: "pointer",
-    fontSize: 14,
-    fontWeight: 500,
-  },
-  esusuContainer: {
-    padding: 16,
-    minHeight: "60vh",
-  },
-  esusuTitle: {
-    margin: "0 0 8px 0",
-    fontSize: 24,
-    fontWeight: 700,
-  },
-  esusuSubtitle: {
-    margin: "0 0 24px 0",
-    fontSize: 14,
-    color: "#94a3b8",
-  },
-  backButton: {
-    padding: "8px 16px",
-    marginBottom: 20,
-    borderRadius: 8,
-    border: "1px solid rgba(255,255,255,0.08)",
-    background: "transparent",
-    color: "#a78bfa",
-    cursor: "pointer",
-    fontSize: 14,
-  },
-  infoBox: {
-    padding: 16,
-    borderRadius: 10,
-    background: "rgba(124,58,237,0.05)",
-    border: "1px solid rgba(124,58,237,0.2)",
-    marginTop: 16,
-    marginBottom: 16,
-  },
-  groupsList: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 12,
-    marginBottom: 20,
-  },
-  groupCard: {
-    padding: 16,
-    borderRadius: 12,
-    background: "#081127",
-    border: "1px solid rgba(255,255,255,0.05)",
-    display: "flex",
-    alignItems: "center",
-    gap: 12,
-  },
-  contributeButton: {
-    padding: "10px 16px",
-    borderRadius: 8,
-    border: "none",
-    background: "#10b981",
-    color: "#fff",
-    cursor: "pointer",
-    fontSize: 13,
-    fontWeight: 600,
-    whiteSpace: "nowrap",
-  },
-  emptyState: {
-    textAlign: "center",
-    padding: "40px 20px",
-    background: "#081127",
-    borderRadius: 12,
-    marginBottom: 20,
-  },
-  uploadArea: {
-    padding: "60px 20px",
-    borderRadius: 16,
-    background: "#081127",
-    border: "2px dashed rgba(124,58,237,0.3)",
-    textAlign: "center",
-    cursor: "pointer",
-    marginBottom: 24,
-    transition: "all 0.3s",
-  },
-  uploadIcon: {
-    fontSize: 64,
-    marginBottom: 8,
-  },
-  billTypeGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(4, 1fr)",
-    gap: 12,
-    marginBottom: 24,
-  },
-  billTypeCard: {
-    padding: 20,
-    borderRadius: 12,
-    background: "#081127",
-    border: "1px solid rgba(255,255,255,0.05)",
-    textAlign: "center",
-  },
-  scanningContainer: {
-    padding: "60px 20px",
-    textAlign: "center",
-  },
-  scanningAnimation: {
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 20,
-  },
-  spinner: {
-    width: 60,
-    height: 60,
-    border: "4px solid rgba(124,58,237,0.1)",
-    borderTop: "4px solid #7c3aed",
-    borderRadius: "50%",
-    animation: "spin 1s linear infinite",
-  },
-  billDetailsContainer: {
-    animation: "fadeIn 0.5s",
-  },
-  successBadge: {
-    display: "inline-block",
-    padding: "8px 16px",
-    borderRadius: 20,
-    background: "rgba(16,185,129,0.1)",
-    border: "1px solid rgba(16,185,129,0.3)",
-    color: "#10b981",
-    fontSize: 13,
-    fontWeight: 600,
-    marginBottom: 20,
-  },
-  billCard: {
-    background: "#081127",
-    borderRadius: 16,
-    padding: 24,
-    border: "1px solid rgba(124,58,237,0.2)",
-  },
-  billHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingBottom: 20,
-    borderBottom: "1px solid rgba(255,255,255,0.05)",
-    marginBottom: 20,
-  },
-  billAmount: {
-    fontSize: 28,
-    fontWeight: 700,
-    color: "#7c3aed",
-  },
-  billDetails: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 12,
-  },
-  billDetailRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "8px 0",
-  },
-  billLabel: {
-    fontSize: 13,
-    color: "#94a3b8",
-  },
-  billValue: {
-    fontSize: 14,
-    fontWeight: 600,
-    color: "#fff",
-    textAlign: "right",
-  },
-  payButton: {
-    flex: 1,
-    padding: "14px 20px",
-    borderRadius: 10,
-    border: "none",
-    background: "#10b981",
-    color: "#fff",
-    cursor: "pointer",
-    fontWeight: 600,
-    fontSize: 16,
-  },
-  securityNote: {
-    marginTop: 16,
-    padding: 12,
-    borderRadius: 8,
-    background: "rgba(59,130,246,0.05)",
-    border: "1px solid rgba(59,130,246,0.1)",
-    textAlign: "center",
-  },
-};
