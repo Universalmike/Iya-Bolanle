@@ -12,7 +12,7 @@ test("parseImageData accepts real image data URLs only", () => {
   assert.equal(parseImageData("data:application/pdf;base64,AAAA"), null);
   assert.equal(parseImageData("not a data url"), null);
   assert.equal(parseImageData(png(10)), null); // too small to be a photo
-  assert.equal(parseImageData(png(5 * 1024 * 1024)), null); // over 4MB
+  assert.equal(parseImageData(png(5 * 1024 * 1024)), null); // over 3MB
   assert.equal(parseImageData(42), null);
 });
 

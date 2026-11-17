@@ -14,15 +14,20 @@ import { signToken, requireAuth, requireSameUser, validateSignup, createRateLimi
 const { Pool } = pkg;
 
 const app = express();
-// Render (and most hosts) sit behind a proxy; needed so req.ip is the real client IP.
+// Vercel (and most hosts) sit behind a proxy; needed so req.ip is the real client IP.
 app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json({ limit: "6mb" })); // bill photos are sent as base64
+// Bill photos are sent as base64. Vercel rejects request bodies over 4.5MB before they reach us.
+app.use(express.json({ limit: "4.5mb" }));
 
-// PostgreSQL connection
+// PostgreSQL connection. Hosted databases (Neon, Supabase, Render…) need SSL; a local one doesn't.
+const isLocalDb = /@(localhost|127\.0\.0\.1)[:/]/.test(process.env.DATABASE_URL || "");
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: isLocalDb ? false : { rejectUnauthorized: false },
+  // On Vercel each function instance has its own pool; keep it small so many instances
+  // don't use up the database's connection limit.
+  max: process.env.VERCEL ? 3 : 10,
 });
 
 // Gemini API configuration. Override GEMINI_MODEL if Google retires this model.
@@ -136,14 +141,80 @@ const createTables = async () => {
     console.log('All tables created successfully');
   } catch (err) {
     console.error('Error creating tables:', err);
+    throw err;
   }
 };
 
-// The Esusu migration runs after the base tables exist (it adds columns and refunds old groups once).
-createTables()
-  .then(() => createBillTables(pool))
-  .then(() => migrateEsusu(pool, withTransaction))
-  .catch((err) => console.error("Esusu migration failed:", err));
+// --------- Database set-up (runs once per schema version) ----------
+// On Vercel many instances can cold-start at once, so set-up holds a Postgres advisory
+// lock and records the version it ran; later starts see the version and skip the work.
+// The lock is transaction-scoped (pg_advisory_xact_lock): it is released at COMMIT/ROLLBACK
+// and stays on one server connection even through a pooler such as Neon's PgBouncer.
+// Bump SETUP_VERSION whenever createTables, createBillTables or migrateEsusu change.
+const SETUP_VERSION = "2026-11-17";
+const SETUP_LOCK_ID = 727274; // any constant number, shared by every instance
+
+const runSetup = async () => {
+  // Fast path for every later cold start (fails harmlessly on a brand-new database).
+  try {
+    const current = await pool.query("SELECT value FROM app_meta WHERE key='setup_version'");
+    if (current.rows[0]?.value === SETUP_VERSION) return;
+  } catch {
+    // app_meta doesn't exist yet
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock($1)", [SETUP_LOCK_ID]);
+    // Created under the lock, so simultaneous first starts can't race on it.
+    await client.query("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    // Another instance may have finished while we waited for the lock.
+    const { rows } = await client.query("SELECT value FROM app_meta WHERE key='setup_version'");
+    if (rows[0]?.value !== SETUP_VERSION) {
+      await createTables();
+      await createBillTables(pool);
+      // After the base tables exist: adds columns and refunds old groups once.
+      await migrateEsusu(pool, withTransaction);
+      await client.query(
+        `INSERT INTO app_meta (key, value) VALUES ('setup_version', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [SETUP_VERSION]
+      );
+      console.log(`Database set-up ${SETUP_VERSION} complete`);
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+// Requests wait for set-up; if it fails (e.g. the database is unreachable) the next request retries.
+let setupPromise = null;
+const ensureSetup = () => {
+  if (!setupPromise) {
+    setupPromise = runSetup().catch((err) => {
+      setupPromise = null;
+      throw err;
+    });
+  }
+  return setupPromise;
+};
+// Open the backend's address in a browser to check it is up (does not touch the database).
+app.get("/", (req, res) => res.json({ ok: true, service: "SARA backend" }));
+
+app.use((req, res, next) => {
+  ensureSetup().then(
+    () => next(),
+    (err) => {
+      console.error("Database not ready:", err.message);
+      res.status(503).json({ message: t("serverError", "english") });
+    }
+  );
+});
 
 // --------- Language ----------
 const isLanguage = (value) => LANGUAGES.includes(value);
@@ -813,8 +884,27 @@ app.use(createBillsRouter({ pool, withTransaction, requireAuth, loadLanguage, fa
 // Routes and round/payout logic live in esusu.js.
 app.use("/esusu", createEsusuRouter({ pool, withTransaction, requireAuth, loadLanguage, fail, t, toSpeech }));
 
-// --------- Start Server ----------
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 SARA backend running on port ${PORT}`);
+// --------- Errors ----------
+// Body-parser errors (photo too large, broken JSON) and anything unexpected become a JSON
+// message the app can show, instead of Express's HTML error page with a stack trace.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (err.type === "entity.too.large") return fail(res, 413, "english", "billImageInvalid");
+  if (err.type === "entity.parse.failed") return fail(res, 400, "english", "missingText");
+  console.error("Unhandled error:", err);
+  fail(res, 500, "english", "serverError");
 });
+
+// --------- Start Server ----------
+// Start database set-up straight away rather than on the first request.
+ensureSetup().catch((err) => console.error("Database set-up failed:", err.message));
+
+// On Vercel the app is a serverless function (see api/index.js), so it must not listen itself.
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => {
+    console.log(`🚀 SARA backend running on port ${PORT}`);
+  });
+}
+
+export default app;

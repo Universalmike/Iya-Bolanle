@@ -7,7 +7,8 @@ import { createRateLimiter } from "./auth.js";
 
 export const BILL_TYPES = ["electricity", "water", "internet", "cable", "other"];
 export const MAX_BILL_AMOUNT = 1_000_000;
-export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+// 3MB of image is ~4MB as base64, under the 4.5MB request limit on Vercel.
+export const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 export const SCAN_TTL_MINUTES = 30; // a scanned bill must be paid within this time
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
 

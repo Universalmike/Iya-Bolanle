@@ -393,11 +393,11 @@ const messages = {
     hausa: () => `Don Allah ka loda hoton takardar biyan ka.`,
   },
   billImageInvalid: {
-    english: () => `I can't open that picture. Please send a JPG or PNG photo under 4MB.`,
-    pidgin: () => `I no fit open that picture. Abeg send JPG or PNG photo wey no pass 4MB.`,
-    yoruba: () => `Mi o le si aworan yen. Jowo fi aworan JPG tabi PNG ti ko ju 4MB lo ranse.`,
-    igbo: () => `Enweghi m ike imeghe foto ahu. Biko ziga foto JPG ma obu PNG nke na-erughi 4MB.`,
-    hausa: () => `Ba zan iya bude wannan hoton ba. Don Allah ka aiko hoton JPG ko PNG da bai wuce 4MB ba.`,
+    english: () => `I can't open that picture. Please send a JPG or PNG photo under 3MB.`,
+    pidgin: () => `I no fit open that picture. Abeg send JPG or PNG photo wey no pass 3MB.`,
+    yoruba: () => `Mi o le si aworan yen. Jowo fi aworan JPG tabi PNG ti ko ju 3MB lo ranse.`,
+    igbo: () => `Enweghi m ike imeghe foto ahu. Biko ziga foto JPG ma obu PNG nke na-erughi 3MB.`,
+    hausa: () => `Ba zan iya bude wannan hoton ba. Don Allah ka aiko hoton JPG ko PNG da bai wuce 3MB ba.`,
   },
   billScannerUnavailable: {
     english: () => `The bill scanner isn't available right now. Please try again later.`,
