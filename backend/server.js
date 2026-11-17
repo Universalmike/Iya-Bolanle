@@ -21,9 +21,14 @@ app.use(cors());
 app.use(express.json({ limit: "4.5mb" }));
 
 // PostgreSQL connection. Hosted databases (Neon, Supabase, Render…) need SSL; a local one doesn't.
-const isLocalDb = /@(localhost|127\.0\.0\.1)[:/]/.test(process.env.DATABASE_URL || "");
+// Vercel's Neon integration may name the variable POSTGRES_URL instead of DATABASE_URL.
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+if (!DATABASE_URL) {
+  console.error("No database configured: set DATABASE_URL (or connect a Neon database in Vercel → Storage).");
+}
+const isLocalDb = /@(localhost|127\.0\.0\.1)[:/]/.test(DATABASE_URL || "");
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: DATABASE_URL,
   ssl: isLocalDb ? false : { rejectUnauthorized: false },
   // On Vercel each function instance has its own pool; keep it small so many instances
   // don't use up the database's connection limit.
